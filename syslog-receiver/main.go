@@ -46,6 +46,57 @@ func parsePriority(s string) (facility, severity uint8) {
 	return uint8(n / 8), uint8(n % 8)
 }
 
+// skipStructuredData advances past the RFC5424 STRUCTURED-DATA field and
+// returns the MSG portion. Handles nil ("-"), single, and multiple SD elements,
+// including param-values that contain spaces.
+func skipStructuredData(s string) string {
+	if s == "" {
+		return ""
+	}
+	// Nil structured data
+	if s[0] == '-' {
+		if len(s) > 2 {
+			return s[2:] // skip "- "
+		}
+		return ""
+	}
+	if s[0] != '[' {
+		return s
+	}
+	i := 0
+	for i < len(s) && s[i] == '[' {
+		inQuote := false
+		i++ // skip '['
+		closed := false
+		for i < len(s) {
+			c := s[i]
+			if c == '\\' && inQuote && i+1 < len(s) {
+				i += 2 // skip escaped character
+				continue
+			}
+			if c == '"' {
+				inQuote = !inQuote
+			} else if c == ']' && !inQuote {
+				i++ // skip ']'
+				closed = true
+				break
+			}
+			i++
+		}
+		if !closed {
+			break
+		}
+		if i < len(s) && s[i] == ' ' {
+			i++ // skip space
+			if i >= len(s) || s[i] != '[' {
+				return s[i:] // space was MSG separator, not between SD elements
+			}
+			// Another SD element follows — continue the outer loop
+		}
+	}
+	return s[i:]
+}
+
 func parseSyslog(raw string, srcIP string) SyslogEntry {
 	entry := SyslogEntry{
 		ReceivedAt: time.Now().UTC(),
@@ -68,34 +119,60 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 		}
 	}
 
-	if len(s) > 2 && s[0] == '1' && s[1] == ' ' {
-		parts := strings.SplitN(s[2:], " ", 7)
-		if len(parts) >= 6 {
-			if h := parts[1]; h != "" && h != "-" {
+	// RFC5424: 1 TIMESTAMP HOSTNAME APP-NAME PROCID [MSGID] STRUCTURED-DATA [MSG]
+	// MSGID is technically required but many senders omit it.
+	// Split into 6 so SD+MSG stay joined; handle both 5-field (no MSGID) and
+	// 6-field forms, and detect when fields[4] is SD rather than MSGID.
+	if len(s) >= 2 && s[0] == '1' && s[1] == ' ' {
+		fields := strings.SplitN(s[2:], " ", 6)
+		if len(fields) >= 5 {
+			if h := fields[1]; h != "" && h != "-" {
 				entry.Hostname = h
 			} else {
 				entry.Hostname = srcIP
 			}
-			if a := parts[2]; a != "-" {
+			if a := fields[2]; a != "-" {
 				entry.AppName = a
 			}
-			entry.ProcID = parts[3]
-			entry.MsgID = parts[4]
-			if len(parts) == 7 {
-				entry.Message = parts[6]
+			entry.ProcID = fields[3]
+
+			var sdAndMsg string
+			if len(fields) == 6 {
+				if strings.HasPrefix(fields[4], "[") {
+					// Sender omitted MSGID; fields[4] is start of SD
+					sdAndMsg = fields[4] + " " + fields[5]
+				} else {
+					entry.MsgID = fields[4]
+					sdAndMsg = fields[5]
+				}
 			} else {
-				entry.Message = parts[5]
+				// 5 fields: PROCID is the last, no SD or message
+				sdAndMsg = fields[4]
 			}
+			entry.Message = skipStructuredData(sdAndMsg)
 			return entry
 		}
 	}
 
+	// RFC3164: Mmm DD HH:MM:SS [HOSTNAME] TAG: MSG
+	// Hostname is optional on some devices — if the first token after the
+	// timestamp looks like a tag (contains '[' or ends with ':'), skip it
+	// and use srcIP instead.
 	if len(s) >= 15 {
 		rest := strings.TrimSpace(s[15:])
 		spaceIdx := strings.Index(rest, " ")
 		if spaceIdx > 0 {
-			entry.Hostname = rest[:spaceIdx]
+			candidate := rest[:spaceIdx]
 			msg := strings.TrimSpace(rest[spaceIdx+1:])
+
+			if looksLikeHostname(candidate) {
+				entry.Hostname = candidate
+			} else {
+				// No hostname in this message — put candidate back into msg
+				entry.Hostname = srcIP
+				msg = rest
+			}
+
 			colonIdx := strings.Index(msg, ":")
 			if colonIdx > 0 {
 				tag := msg[:colonIdx]
@@ -111,7 +188,6 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 				entry.Message = msg
 			}
 		} else {
-			log.Printf("WARN: RFC3164 parse fallback (no space) from %s: %.120s", srcIP, s)
 			entry.Hostname = srcIP
 			entry.Message = rest
 		}
@@ -507,45 +583,60 @@ func main() {
 		}
 	}()
 
-	udpAddr, _ := net.ResolveUDPAddr("udp", ":514")
-	udpConn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		log.Fatalf("UDP listen error: %v", err)
-	}
-	defer udpConn.Close()
-
-	tcpLn, err := net.Listen("tcp", ":514")
-	if err != nil {
-		log.Fatalf("TCP listen error: %v", err)
-	}
-	defer tcpLn.Close()
-
-	log.Println("syslog receiver listening on UDP/TCP :514")
-
-	go func() {
-		buf := make([]byte, 65536)
-		for {
-			n, addr, err := udpConn.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			entry := parseSyslog(string(buf[:n]), addr.IP.String())
-			msg := entryToJSON(entry)
-			store.add(msg)    // commit before broadcast so poll handlers find it immediately
-			hub.broadcast(msg)
-			bw.Add(entry)
+	listenUDP := func(network, addr string) {
+		a, err := net.ResolveUDPAddr(network, addr)
+		if err != nil {
+			log.Printf("UDP resolve %s %s: %v", network, addr, err)
+			return
 		}
-	}()
-
-	go func() {
-		for {
-			conn, err := tcpLn.Accept()
-			if err != nil {
-				return
-			}
-			go handleTCP(conn, bw, hub, store)
+		conn, err := net.ListenUDP(network, a)
+		if err != nil {
+			log.Printf("UDP listen %s %s: %v (skipping)", network, addr, err)
+			return
 		}
-	}()
+		log.Printf("UDP listening on %s", conn.LocalAddr())
+		go func() {
+			defer conn.Close()
+			buf := make([]byte, 65536)
+			for {
+				n, src, err := conn.ReadFromUDP(buf)
+				if err != nil {
+					return
+				}
+				entry := parseSyslog(string(buf[:n]), normalizeIP(src.IP))
+				msg := entryToJSON(entry)
+				store.add(msg)
+				hub.broadcast(msg)
+				bw.Add(entry)
+			}
+		}()
+	}
+
+	listenTCP := func(network, addr string) {
+		ln, err := net.Listen(network, addr)
+		if err != nil {
+			log.Printf("TCP listen %s %s: %v (skipping)", network, addr, err)
+			return
+		}
+		log.Printf("TCP listening on %s", ln.Addr())
+		go func() {
+			defer ln.Close()
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go handleTCP(conn, bw, hub, store)
+			}
+		}()
+	}
+
+	listenUDP("udp4", "0.0.0.0:514")
+	listenUDP("udp6", "[::]:514")
+	listenTCP("tcp4", "0.0.0.0:514")
+	listenTCP("tcp6", "[::]:514")
+
+	log.Println("syslog receiver listening on UDP/TCP :514 (IPv4 + IPv6)")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -554,9 +645,42 @@ func main() {
 	bw.Stop()
 }
 
+// looksLikeHostname returns true only for tokens that are plausibly a hostname
+// or IP address in an RFC3164 message. Plain words (e.g. "HTTP", "Downloading")
+// are rejected so embedded devices that omit the hostname field don't pollute
+// the host column with log message content.
+func looksLikeHostname(s string) bool {
+	if s == "" || s == "-" {
+		return false
+	}
+	// Structured-data fragments
+	if strings.ContainsAny(s, "[]") {
+		return false
+	}
+	// IP address (v4 or v6)
+	if net.ParseIP(s) != nil {
+		return true
+	}
+	// FQDN or hyphenated hostname (server-1, my.host.local)
+	if strings.ContainsAny(s, ".-") {
+		return true
+	}
+	// Reject plain words — likely the start of a message from a device
+	// that omits the hostname field.
+	return false
+}
+
+// normalizeIP converts IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to plain IPv4.
+func normalizeIP(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
+}
+
 func handleTCP(conn net.Conn, bw *BatchWriter, hub *Hub, store *Store) {
 	defer conn.Close()
-	srcIP := conn.RemoteAddr().(*net.TCPAddr).IP.String()
+	srcIP := normalizeIP(conn.RemoteAddr().(*net.TCPAddr).IP)
 	buf := make([]byte, 65536)
 	var accumulator strings.Builder
 	for {
