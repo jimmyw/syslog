@@ -24,26 +24,33 @@ function relativeToSQL(rel) {
   return `now() - INTERVAL ${n} ${map[unit]}`;
 }
 
-export const api = {
-  async getLogs({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, limit = 200 } = {}) {
-    const sinceExpr = from
-      ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
-      : (relativeToSQL(since) || `'${since}'`);
-    const where = [`received_at >= ${sinceExpr}`];
-    if (until) where.push(`received_at <= '${until}'`);
-    if (source_ip) where.push(`source_ip = '${source_ip.replace(/'/g, "''")}'`);
-    if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
-    if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);
-    if (severity_max !== undefined && severity_max !== null) where.push(`severity <= ${severity_max}`);
-    if (message_contains) where.push(`positionCaseInsensitive(message, '${message_contains.replace(/'/g, "''")}') > 0`);
+export function buildLogsSQL({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, limit = 200 } = {}) {
+  const sinceExpr = from
+    ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
+    : (relativeToSQL(since) || `'${since}'`);
+  const where = [`received_at >= ${sinceExpr}`];
+  if (until) where.push(`received_at <= '${until}'`);
+  if (source_ip) where.push(`source_ip = '${source_ip.replace(/'/g, "''")}'`);
+  if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
+  if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);
+  if (severity_max !== undefined && severity_max !== null) where.push(`severity <= ${severity_max}`);
+  if (message_contains) where.push(`positionCaseInsensitive(message, '${message_contains.replace(/'/g, "''")}') > 0`);
+  return (
+    `SELECT received_at, hostname, app_name, proc_id, severity, severity_name, facility_name, source_ip, message\n` +
+    `FROM syslog.logs\n` +
+    `WHERE ${where.join("\n  AND ")}\n` +
+    `ORDER BY received_at DESC\n` +
+    `LIMIT ${Math.min(limit, 2000)}`
+  );
+}
 
-    return chQuery(`
-      SELECT received_at, hostname, app_name, proc_id, severity, severity_name, facility_name, source_ip, message
-      FROM syslog.logs
-      WHERE ${where.join(" AND ")}
-      ORDER BY received_at DESC
-      LIMIT ${Math.min(limit, 2000)}
-    `);
+export const api = {
+  async getLogs(params = {}) {
+    return chQuery(buildLogsSQL(params));
+  },
+
+  async rawQuery(sql) {
+    return chQuery(sql.trim());
   },
 
   async getHosts() {

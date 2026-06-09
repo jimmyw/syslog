@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api } from "./api";
+import { api, buildLogsSQL } from "./api";
 
 const SEV_COLOR = {
   emerg:   "#ff2d55",
@@ -121,7 +121,50 @@ function HostList({ hosts, selectedSourceIP, onSelect }) {
   );
 }
 
-function Toolbar({ filters, setFilters, loading, onRefresh, onClear, onResetCleared, liveMode, setLiveMode }) {
+function QueryPanel({ sql, onRun, loading }) {
+  const [text, setText] = useState(sql);
+  const [error, setError] = useState(null);
+  useEffect(() => { setText(sql); }, [sql]);
+
+  const run = async () => {
+    setError(null);
+    try { await onRun(text); }
+    catch (e) { setError(e.message); }
+  };
+
+  return (
+    <div style={{ borderBottom: "1px solid #2c2c2e", background: "#080808", padding: "8px 12px", flexShrink: 0 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "center" }}>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", color: "#636366", textTransform: "uppercase", fontFamily: "monospace" }}>SQL</span>
+        <button
+          onClick={run}
+          disabled={loading}
+          style={{ ...btnStyle, background: "#0d2b0d", color: "#30d158", border: "1px solid #1a3d1a" }}
+        >
+          ▶ run
+        </button>
+        <span style={{ fontSize: 10, color: "#636366", fontFamily: "monospace" }}>or Ctrl+Enter</span>
+        {error && <span style={{ fontSize: 11, color: "#ff453a", fontFamily: "monospace", marginLeft: 8 }}>{error}</span>}
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        spellCheck={false}
+        onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); } }}
+        style={{
+          width: "100%", boxSizing: "border-box",
+          background: "#1c1c1e", border: "1px solid #2c2c2e", borderRadius: 4,
+          color: "#ebebf5", fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+          fontSize: 11, lineHeight: "1.5", padding: "6px 8px",
+          resize: "vertical", minHeight: 80, outline: "none",
+        }}
+        rows={4}
+      />
+    </div>
+  );
+}
+
+function Toolbar({ filters, setFilters, loading, onRefresh, onClear, onResetCleared, liveMode, setLiveMode, showSql, onToggleSql }) {
   return (
     <div style={{
       display: "flex", gap: 8, padding: "8px 12px", borderBottom: "1px solid #2c2c2e",
@@ -178,6 +221,12 @@ function Toolbar({ filters, setFilters, loading, onRefresh, onClear, onResetClea
       <button onClick={onRefresh} disabled={loading} style={btnStyle}>
         {loading ? "…" : "↺"}
       </button>
+      <button
+        onClick={onToggleSql}
+        style={{ ...btnStyle, marginLeft: "auto", background: showSql ? "#1c2b3a" : "#2c2c2e", color: showSql ? "#64d2ff" : "#ebebf5" }}
+      >
+        SQL
+      </button>
     </div>
   );
 }
@@ -221,11 +270,14 @@ export default function App() {
   const [liveMode, setLiveMode] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [clearedAt, setClearedAt] = useState(null);
+  const [showSql, setShowSql] = useState(false);
+  const [sql, setSql] = useState(() => buildLogsSQL({ since: "1h" }));
   const bottomRef = useRef(null);
   const clearedAtRef = useRef(null);
   const filtersRef = useRef(filters);
   useEffect(() => { clearedAtRef.current = clearedAt; }, [clearedAt]);
   useEffect(() => { filtersRef.current = filters; }, [filters]);
+  useEffect(() => { setSql(buildLogsSQL({ ...filters, from: clearedAt })); }, [filters, clearedAt]);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
@@ -298,6 +350,16 @@ export default function App() {
     setClearedAt(new Date().toISOString());
   }, []);
 
+  const runSql = useCallback(async (rawSql) => {
+    setLoading(true);
+    try {
+      const data = await api.rawQuery(rawSql);
+      setLogs(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#000", color: "#ebebf5" }}>
       {/* Header */}
@@ -320,7 +382,10 @@ export default function App() {
         onResetCleared={() => setClearedAt(null)}
         liveMode={liveMode}
         setLiveMode={setLiveMode}
+        showSql={showSql}
+        onToggleSql={() => setShowSql((v) => !v)}
       />
+      {showSql && <QueryPanel sql={sql} onRun={runSql} loading={loading} />}
 
       {/* Body */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
