@@ -1,0 +1,85 @@
+services:
+
+  # ─── ClickHouse ────────────────────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.5-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: syslog
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "127.0.0.1:8123:8123"   # HTTP API (internal only)
+      - "127.0.0.1:9000:9000"   # Native protocol (internal only)
+    networks:
+      default:
+        ipv4_address: 192.168.10.21
+
+  # ─── Syslog Receiver ───────────────────────────────────────────────────────
+  syslog-receiver:
+    build: ./syslog-receiver
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "514:514/udp"     # Syslog UDP
+      - "514:514/tcp"     # Syslog TCP
+    networks:
+      default:
+        ipv4_address: 192.168.10.19
+      pub_net:
+        ipv4_address: 192.168.1.247
+
+  # ─── Frontend ──────────────────────────────────────────────────────────────
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - clickhouse
+    ports:
+      - "8080:80"
+    networks:
+      default:
+        ipv4_address: 192.168.10.22
+
+
+  # ─── MCP Server ────────────────────────────────────────────────────────────
+  mcp-server:
+    build: ./mcp-server
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    stdin_open: true    # MCP uses stdio transport
+    tty: false
+    # Not exposed on any port — accessed via 'docker exec' or 'docker attach'
+    # or via the Claude Desktop MCP config below
+    networks:
+      default:
+        ipv4_address: 192.168.10.23
+
+volumes:
+  clickhouse_data:
+    driver: local
+networks:
+  pub_net:
+    external: true
+  default:
+    name: harbour
+    external: true

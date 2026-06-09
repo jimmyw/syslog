@@ -1,0 +1,10 @@
+{
+  "name": "syslog-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@clickhouse/client": "^1.4.0",
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  }
+}
