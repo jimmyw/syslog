@@ -25,8 +25,11 @@ function relativeToSQL(rel) {
 }
 
 export const api = {
-  async getLogs({ hostname, app_name, severity_max, message_contains, since = "1h", until, limit = 200 } = {}) {
-    const where = [`received_at >= ${relativeToSQL(since) || `'${since}'`}`];
+  async getLogs({ hostname, app_name, severity_max, message_contains, since = "1h", from, until, limit = 200 } = {}) {
+    const sinceExpr = from
+      ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
+      : (relativeToSQL(since) || `'${since}'`);
+    const where = [`received_at >= ${sinceExpr}`];
     if (until) where.push(`received_at <= '${until}'`);
     if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
     if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);

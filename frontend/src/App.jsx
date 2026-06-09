@@ -105,7 +105,7 @@ function HostList({ hosts, selectedHost, onSelect }) {
   );
 }
 
-function Toolbar({ filters, setFilters, loading, onRefresh, liveMode, setLiveMode }) {
+function Toolbar({ filters, setFilters, loading, onRefresh, onClear, onResetCleared, liveMode, setLiveMode }) {
   return (
     <div style={{
       display: "flex", gap: 8, padding: "8px 12px", borderBottom: "1px solid #2c2c2e",
@@ -141,7 +141,7 @@ function Toolbar({ filters, setFilters, loading, onRefresh, liveMode, setLiveMod
       </select>
       <select
         value={filters.since || "1h"}
-        onChange={(e) => setFilters((f) => ({ ...f, since: e.target.value }))}
+        onChange={(e) => { onResetCleared(); setFilters((f) => ({ ...f, since: e.target.value })); }}
         style={{ ...inputStyle, width: 90 }}
       >
         {["5m","15m","1h","6h","24h","7d"].map(v => <option key={v} value={v}>{v}</option>)}
@@ -155,6 +155,9 @@ function Toolbar({ filters, setFilters, loading, onRefresh, liveMode, setLiveMod
         }}
       >
         {liveMode ? "● LIVE" : "LIVE"}
+      </button>
+      <button onClick={onClear} disabled={loading} style={{ ...btnStyle, color: "#ff453a" }}>
+        ✕ clear
       </button>
       <button onClick={onRefresh} disabled={loading} style={btnStyle}>
         {loading ? "…" : "↺"}
@@ -201,6 +204,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [liveMode, setLiveMode] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [clearedAt, setClearedAt] = useState(null);
   const bottomRef = useRef(null);
   const intervalRef = useRef(null);
 
@@ -208,7 +212,7 @@ export default function App() {
     setLoading(true);
     try {
       const [logData, hostData, statsData] = await Promise.all([
-        api.getLogs({ ...filters }),
+        api.getLogs({ ...filters, from: clearedAt }),
         api.getHosts(),
         api.getStats(filters.since || "1h"),
       ]);
@@ -220,7 +224,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [filters, clearedAt]);
 
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 
@@ -238,6 +242,11 @@ export default function App() {
       bottomRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [logs, autoScroll]);
+
+  const clearLogs = useCallback(() => {
+    setLogs([]);
+    setClearedAt(new Date().toISOString());
+  }, []);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#000", color: "#ebebf5" }}>
@@ -257,6 +266,8 @@ export default function App() {
         setFilters={setFilters}
         loading={loading}
         onRefresh={fetchLogs}
+        onClear={clearLogs}
+        onResetCleared={() => setClearedAt(null)}
         liveMode={liveMode}
         setLiveMode={setLiveMode}
       />
