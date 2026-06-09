@@ -27,7 +27,7 @@ function SevBadge({ name }) {
   );
 }
 
-function LogRow({ log, highlight }) {
+function LogRow({ log, highlight, tightBottom }) {
   const ts = new Date(log.received_at).toLocaleTimeString("sv-SE", { hour12: false }) +
     "." + String(new Date(log.received_at).getMilliseconds()).padStart(3, "0");
   const msg = highlight
@@ -37,9 +37,10 @@ function LogRow({ log, highlight }) {
   return (
     <div style={{
       display: "flex", gap: 8, alignItems: "baseline",
-      padding: "2px 12px", fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      padding: "2px 12px",
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
       fontSize: 12, lineHeight: "1.6",
-      borderBottom: "1px solid #1c1c1e",
+      borderBottom: tightBottom ? "none" : "1px solid #1c1c1e",
       background: SEV_MAX[log.severity_name] <= 3 ? "rgba(255,60,0,0.04)" : "transparent",
     }}>
       <span style={{ color: "#48484a", flexShrink: 0, fontSize: 11 }}>{ts}</span>
@@ -206,7 +207,10 @@ export default function App() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [clearedAt, setClearedAt] = useState(null);
   const bottomRef = useRef(null);
-  const intervalRef = useRef(null);
+  const clearedAtRef = useRef(null);
+  const filtersRef = useRef(filters);
+  useEffect(() => { clearedAtRef.current = clearedAt; }, [clearedAt]);
+  useEffect(() => { filtersRef.current = filters; }, [filters]);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
@@ -229,13 +233,43 @@ export default function App() {
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 
   useEffect(() => {
-    if (liveMode) {
-      intervalRef.current = setInterval(fetchLogs, 5000);
-    } else {
-      clearInterval(intervalRef.current);
-    }
-    return () => clearInterval(intervalRef.current);
-  }, [liveMode, fetchLogs]);
+    if (!liveMode) return;
+    let active = true;
+    let seq = null;
+
+    (async () => {
+      while (active) {
+        try {
+          const url = seq !== null ? `/poll?seq=${seq}` : "/poll";
+          const res = await fetch(url);
+          if (!res.ok) { await new Promise(r => setTimeout(r, 1000)); continue; }
+          const data = await res.json();
+          seq = data.seq;
+          if (!active || !data.logs.length) continue;
+          setLogs((prev) => {
+            const f = filtersRef.current;
+            const ca = clearedAtRef.current;
+            const caMs = ca ? new Date(ca).getTime() : null;
+            const filtered = data.logs.filter((log) => {
+              if (caMs && new Date(log.received_at).getTime() < caMs) return false;
+              if (f.hostname && log.hostname !== f.hostname) return false;
+              if (f.app_name && log.app_name !== f.app_name) return false;
+              if (f.severity_max != null && log.severity > f.severity_max) return false;
+              if (f.message_contains && !log.message.toLowerCase().includes(f.message_contains.toLowerCase())) return false;
+              return true;
+            });
+            if (!filtered.length) return prev;
+            const next = [...prev, ...filtered];
+            return next.length > 500 ? next.slice(-500) : next;
+          });
+        } catch {
+          if (active) await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+    })();
+
+    return () => { active = false; };
+  }, [liveMode]);
 
   useEffect(() => {
     if (autoScroll && bottomRef.current) {
@@ -292,9 +326,14 @@ export default function App() {
               No logs match your filters.
             </div>
           )}
-          {logs.map((log, i) => (
-            <LogRow key={i} log={log} highlight={filters.message_contains} />
-          ))}
+          {logs.map((log, i) => {
+            const ms = new Date(log.received_at).getTime();
+            const nextMs = i < logs.length - 1 ? new Date(logs[i + 1].received_at).getTime() : null;
+            const tightBottom = nextMs !== null && logs[i + 1].hostname === log.hostname && nextMs - ms < 100;
+            return (
+              <LogRow key={i} log={log} highlight={filters.message_contains} tightBottom={tightBottom} />
+            );
+          })}
           <div ref={bottomRef} />
         </div>
       </div>

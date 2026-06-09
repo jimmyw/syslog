@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -58,7 +60,6 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 
 	s := strings.TrimSpace(raw)
 
-	// Parse priority <PRI>
 	if len(s) > 3 && s[0] == '<' {
 		end := strings.Index(s, ">")
 		if end > 0 {
@@ -67,8 +68,6 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 		}
 	}
 
-	// Try RFC5424: VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID SP STRUCTURED-DATA [SP MSG]
-	// Version is "1"
 	if len(s) > 2 && s[0] == '1' && s[1] == ' ' {
 		parts := strings.SplitN(s[2:], " ", 7)
 		if len(parts) >= 6 {
@@ -82,7 +81,6 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 			}
 			entry.ProcID = parts[3]
 			entry.MsgID = parts[4]
-			// parts[5] is structured-data; actual message is parts[6] if present
 			if len(parts) == 7 {
 				entry.Message = parts[6]
 			} else {
@@ -92,8 +90,6 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 		}
 	}
 
-	// RFC3164: Mmm DD HH:MM:SS HOSTNAME TAG: MSG
-	// Skip timestamp (15 chars: "Jan  1 00:00:00")
 	if len(s) >= 15 {
 		rest := strings.TrimSpace(s[15:])
 		spaceIdx := strings.Index(rest, " ")
@@ -115,7 +111,6 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 				entry.Message = msg
 			}
 		} else {
-			// No hostname/tag structure — store the whole remainder as message
 			log.Printf("WARN: RFC3164 parse fallback (no space) from %s: %.120s", srcIP, s)
 			entry.Hostname = srcIP
 			entry.Message = rest
@@ -123,12 +118,235 @@ func parseSyslog(raw string, srcIP string) SyslogEntry {
 		return entry
 	}
 
-	// Unknown format — store raw so nothing is silently lost
 	log.Printf("WARN: unrecognised syslog format from %s: %.120s", srcIP, raw)
 	entry.Hostname = srcIP
 	entry.Message = s
 	return entry
 }
+
+// ── Entry store (ring buffer with monotonic sequence numbers) ─────────────────
+//
+// The store is the source of truth for the poll endpoint. store.add() must be
+// called before hub.broadcast() so that when a poll handler wakes up from the
+// channel it always finds the entry already committed here.
+
+type storedEntry struct {
+	seq  uint64
+	data json.RawMessage
+}
+
+type Store struct {
+	mu      sync.Mutex
+	entries []storedEntry
+	nextSeq uint64
+	maxSize int
+}
+
+func newStore(size int) *Store {
+	return &Store{maxSize: size, entries: make([]storedEntry, 0, size)}
+}
+
+func (s *Store) add(data string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = append(s.entries, storedEntry{seq: s.nextSeq, data: json.RawMessage(data)})
+	s.nextSeq++
+	if len(s.entries) > s.maxSize {
+		s.entries = s.entries[len(s.entries)-s.maxSize:]
+	}
+}
+
+// since returns all entries with seq >= afterSeq plus the current nextSeq.
+func (s *Store) since(afterSeq uint64) ([]json.RawMessage, uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]json.RawMessage, 0)
+	for _, e := range s.entries {
+		if e.seq >= afterSeq {
+			out = append(out, e.data)
+		}
+	}
+	return out, s.nextSeq
+}
+
+func (s *Store) currentSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextSeq
+}
+
+// ── SSE hub (fan-out broadcast to connected clients) ─────────────────────────
+
+type Hub struct {
+	mu      sync.Mutex
+	clients map[chan string]struct{}
+}
+
+func newHub() *Hub { return &Hub{clients: make(map[chan string]struct{})} }
+
+func (h *Hub) subscribe() chan string {
+	ch := make(chan string, 64)
+	h.mu.Lock()
+	h.clients[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *Hub) unsubscribe(ch chan string) {
+	h.mu.Lock()
+	delete(h.clients, ch)
+	h.mu.Unlock()
+}
+
+func (h *Hub) broadcast(msg string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.clients {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
+func (h *Hub) streamHandler(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ch := h.subscribe()
+	defer h.unsubscribe(ch)
+
+	for {
+		select {
+		case msg := <-ch:
+			fmt.Fprintf(w, "data: %s\n\n", msg)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// ── Long-poll handler ─────────────────────────────────────────────────────────
+//
+// GET /poll          → returns {seq, logs:[]} immediately (bootstrap cursor)
+// GET /poll?seq=N    → blocks until entries with seq >= N exist, returns them
+//
+// Because store.add() is always called before hub.broadcast(), any entry that
+// wakes this handler is already committed to the store. Re-reading the store
+// after wakeup collects all entries that piled up in the same instant.
+
+type pollResponse struct {
+	Seq  uint64            `json:"seq"`
+	Logs []json.RawMessage `json:"logs"`
+}
+
+func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		seqStr := r.URL.Query().Get("seq")
+
+		// Bootstrap: no cursor yet — return current seq so client can start from now.
+		if seqStr == "" {
+			json.NewEncoder(w).Encode(pollResponse{Seq: store.currentSeq(), Logs: []json.RawMessage{}})
+			return
+		}
+
+		afterSeq, err := strconv.ParseUint(seqStr, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid seq", http.StatusBadRequest)
+			return
+		}
+
+		// Fast path: entries already in the store.
+		if entries, nextSeq := store.since(afterSeq); len(entries) > 0 {
+			json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
+			return
+		}
+
+		// Subscribe before the second check to close the race window.
+		ch := hub.subscribe()
+		defer hub.unsubscribe(ch)
+
+		// Second check: an entry may have been stored between the first check
+		// and subscribe().
+		if entries, nextSeq := store.since(afterSeq); len(entries) > 0 {
+			json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
+			return
+		}
+
+		// Block until something arrives, client disconnects, or 30 s pass.
+		timeout := time.NewTimer(30 * time.Second)
+		defer timeout.Stop()
+
+		select {
+		case <-ch:
+		case <-timeout.C:
+		case <-r.Context().Done():
+			return
+		}
+
+		// Drain any additional signals that piled up.
+		for {
+			select {
+			case <-ch:
+			default:
+				goto respond
+			}
+		}
+	respond:
+		entries, nextSeq := store.since(afterSeq)
+		json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
+	}
+}
+
+// logEvent matches the JSON shape the frontend expects from ClickHouse queries.
+type logEvent struct {
+	ReceivedAt   string `json:"received_at"`
+	Hostname     string `json:"hostname"`
+	AppName      string `json:"app_name"`
+	ProcID       string `json:"proc_id"`
+	Severity     uint8  `json:"severity"`
+	SeverityName string `json:"severity_name"`
+	FacilityName string `json:"facility_name"`
+	SourceIP     string `json:"source_ip"`
+	Message      string `json:"message"`
+}
+
+func entryToJSON(e SyslogEntry) string {
+	fn := "unknown"
+	if int(e.Facility) < len(facilityNames) {
+		fn = facilityNames[e.Facility]
+	}
+	sn := "unknown"
+	if int(e.Severity) < len(severityNames) {
+		sn = severityNames[e.Severity]
+	}
+	b, _ := json.Marshal(logEvent{
+		ReceivedAt:   e.ReceivedAt.Format(time.RFC3339Nano),
+		Hostname:     e.Hostname,
+		AppName:      e.AppName,
+		ProcID:       e.ProcID,
+		Severity:     e.Severity,
+		SeverityName: sn,
+		FacilityName: fn,
+		SourceIP:     e.SourceIP,
+		Message:      e.Message,
+	})
+	return string(b)
+}
+
+// ── Batch writer ──────────────────────────────────────────────────────────────
 
 type BatchWriter struct {
 	mu      sync.Mutex
@@ -228,6 +446,8 @@ func (bw *BatchWriter) Stop() {
 	close(bw.done)
 }
 
+// ── ClickHouse connection ─────────────────────────────────────────────────────
+
 func connectClickHouse() driver.Conn {
 	host := os.Getenv("CLICKHOUSE_HOST")
 	if host == "" {
@@ -267,13 +487,26 @@ func connectClickHouse() driver.Conn {
 	return nil
 }
 
+// ── main ──────────────────────────────────────────────────────────────────────
+
 func main() {
 	conn := connectClickHouse()
 	defer conn.Close()
 
 	bw := NewBatchWriter(conn, 1000, 2*time.Second)
 
-	// UDP listener
+	hub := newHub()
+	store := newStore(10000)
+
+	http.HandleFunc("/stream", hub.streamHandler)
+	http.HandleFunc("/poll", makePollHandler(hub, store))
+	go func() {
+		log.Println("HTTP server listening on :8888")
+		if err := http.ListenAndServe(":8888", nil); err != nil {
+			log.Fatalf("HTTP server: %v", err)
+		}
+	}()
+
 	udpAddr, _ := net.ResolveUDPAddr("udp", ":514")
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
@@ -281,7 +514,6 @@ func main() {
 	}
 	defer udpConn.Close()
 
-	// TCP listener
 	tcpLn, err := net.Listen("tcp", ":514")
 	if err != nil {
 		log.Fatalf("TCP listen error: %v", err)
@@ -297,8 +529,10 @@ func main() {
 			if err != nil {
 				return
 			}
-			srcIP := addr.IP.String()
-			entry := parseSyslog(string(buf[:n]), srcIP)
+			entry := parseSyslog(string(buf[:n]), addr.IP.String())
+			msg := entryToJSON(entry)
+			store.add(msg)    // commit before broadcast so poll handlers find it immediately
+			hub.broadcast(msg)
 			bw.Add(entry)
 		}
 	}()
@@ -309,7 +543,7 @@ func main() {
 			if err != nil {
 				return
 			}
-			go handleTCP(conn, bw)
+			go handleTCP(conn, bw, hub, store)
 		}
 	}()
 
@@ -320,7 +554,7 @@ func main() {
 	bw.Stop()
 }
 
-func handleTCP(conn net.Conn, bw *BatchWriter) {
+func handleTCP(conn net.Conn, bw *BatchWriter, hub *Hub, store *Store) {
 	defer conn.Close()
 	srcIP := conn.RemoteAddr().(*net.TCPAddr).IP.String()
 	buf := make([]byte, 65536)
@@ -340,7 +574,11 @@ func handleTCP(conn net.Conn, bw *BatchWriter) {
 			line := data[:idx]
 			data = data[idx+1:]
 			if line = strings.TrimSpace(line); line != "" {
-				bw.Add(parseSyslog(line, srcIP))
+				entry := parseSyslog(line, srcIP)
+				msg := entryToJSON(entry)
+				store.add(msg)
+				hub.broadcast(msg)
+				bw.Add(entry)
 			}
 		}
 		accumulator.Reset()
