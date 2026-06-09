@@ -25,12 +25,13 @@ function relativeToSQL(rel) {
 }
 
 export const api = {
-  async getLogs({ hostname, app_name, severity_max, message_contains, since = "1h", from, until, limit = 200 } = {}) {
+  async getLogs({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, limit = 200 } = {}) {
     const sinceExpr = from
       ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
       : (relativeToSQL(since) || `'${since}'`);
     const where = [`received_at >= ${sinceExpr}`];
     if (until) where.push(`received_at <= '${until}'`);
+    if (source_ip) where.push(`source_ip = '${source_ip.replace(/'/g, "''")}'`);
     if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
     if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);
     if (severity_max !== undefined && severity_max !== null) where.push(`severity <= ${severity_max}`);
@@ -47,13 +48,15 @@ export const api = {
 
   async getHosts() {
     return chQuery(`
-      SELECT hostname, source_ip,
-             count() AS total,
-             max(received_at) AS last_seen,
-             countIf(severity <= 3) AS error_count
+      SELECT
+        source_ip,
+        argMax(hostname, received_at) AS hostname,
+        count() AS total,
+        max(received_at) AS last_seen,
+        countIf(severity <= 3) AS error_count
       FROM syslog.logs
       WHERE received_at >= now() - INTERVAL 7 DAY
-      GROUP BY hostname, source_ip
+      GROUP BY source_ip
       ORDER BY last_seen DESC
     `);
   },

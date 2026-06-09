@@ -47,6 +47,10 @@ function LogRow({ log, highlight, tightBottom }) {
       <SevBadge name={log.severity_name} />
       <span style={{ color: "#8e8e93", flexShrink: 0, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         title={log.hostname}>{log.hostname}</span>
+      {log.source_ip && log.source_ip !== log.hostname && (
+        <span style={{ color: "#3a3a3c", flexShrink: 0, maxWidth: 95, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11 }}
+          title={log.source_ip}>{log.source_ip}</span>
+      )}
       <span style={{ color: "#5e5ce6", flexShrink: 0, maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         title={log.app_name}>{log.app_name}</span>
       <span style={{ color: "#ebebf5cc", flex: 1, wordBreak: "break-all" }}>
@@ -60,7 +64,7 @@ function LogRow({ log, highlight, tightBottom }) {
   );
 }
 
-function HostList({ hosts, selectedHost, onSelect }) {
+function HostList({ hosts, selectedSourceIP, onSelect }) {
   return (
     <div style={{ width: 220, flexShrink: 0, borderRight: "1px solid #2c2c2e", overflowY: "auto" }}>
       <div style={{ padding: "10px 12px 6px", fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", color: "#636366", textTransform: "uppercase" }}>
@@ -70,38 +74,49 @@ function HostList({ hosts, selectedHost, onSelect }) {
         onClick={() => onSelect(null)}
         style={{
           padding: "6px 12px", cursor: "pointer", fontSize: 12,
-          background: selectedHost === null ? "#2c2c2e" : "transparent",
-          color: selectedHost === null ? "#fff" : "#ebebf5",
+          background: selectedSourceIP === null ? "#2c2c2e" : "transparent",
+          color: selectedSourceIP === null ? "#fff" : "#ebebf5",
           display: "flex", justifyContent: "space-between",
         }}
       >
         <span>All hosts</span>
       </div>
-      {hosts.map((h) => (
-        <div
-          key={h.hostname + h.source_ip}
-          onClick={() => onSelect(h.hostname)}
-          style={{
-            padding: "5px 12px", cursor: "pointer", fontSize: 12,
-            background: selectedHost === h.hostname ? "#2c2c2e" : "transparent",
-            color: "#ebebf5",
-            display: "flex", justifyContent: "space-between", alignItems: "center",
-            gap: 4,
-          }}
-        >
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={h.hostname}>
-            {h.hostname}
-          </span>
-          <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-            {parseInt(h.error_count) > 0 && (
-              <span style={{ fontSize: 10, background: "#ff3b30", color: "#fff", borderRadius: 3, padding: "0 4px" }}>
-                {h.error_count}
-              </span>
-            )}
-            <span style={{ fontSize: 10, color: "#48484a" }}>{parseInt(h.total).toLocaleString()}</span>
-          </span>
-        </div>
-      ))}
+      {hosts.map((h) => {
+        const label = h.hostname !== h.source_ip ? h.hostname : h.source_ip;
+        const sublabel = h.hostname !== h.source_ip ? h.source_ip : null;
+        return (
+          <div
+            key={h.source_ip}
+            onClick={() => onSelect(h.source_ip)}
+            style={{
+              padding: "5px 12px", cursor: "pointer", fontSize: 12,
+              background: selectedSourceIP === h.source_ip ? "#2c2c2e" : "transparent",
+              color: "#ebebf5",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <div style={{ overflow: "hidden", flex: 1, minWidth: 0 }}>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>
+                {label}
+              </div>
+              {sublabel && (
+                <div style={{ fontSize: 10, color: "#48484a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {sublabel}
+                </div>
+              )}
+            </div>
+            <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+              {parseInt(h.error_count) > 0 && (
+                <span style={{ fontSize: 10, background: "#ff3b30", color: "#fff", borderRadius: 3, padding: "0 4px" }}>
+                  {h.error_count}
+                </span>
+              )}
+              <span style={{ fontSize: 10, color: "#48484a" }}>{parseInt(h.total).toLocaleString()}</span>
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -252,7 +267,8 @@ export default function App() {
             const caMs = ca ? new Date(ca).getTime() : null;
             const filtered = data.logs.filter((log) => {
               if (caMs && new Date(log.received_at).getTime() < caMs) return false;
-              if (f.hostname && log.hostname !== f.hostname) return false;
+              if (f.source_ip && log.source_ip !== f.source_ip) return false;
+              if (f.hostname && !log.hostname.toLowerCase().includes(f.hostname.toLowerCase())) return false;
               if (f.app_name && log.app_name !== f.app_name) return false;
               if (f.severity_max != null && log.severity > f.severity_max) return false;
               if (f.message_contains && !log.message.toLowerCase().includes(f.message_contains.toLowerCase())) return false;
@@ -310,8 +326,8 @@ export default function App() {
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <HostList
           hosts={hosts}
-          selectedHost={filters.hostname || null}
-          onSelect={(h) => setFilters((f) => ({ ...f, hostname: h || undefined }))}
+          selectedSourceIP={filters.source_ip || null}
+          onSelect={(ip) => setFilters((f) => ({ ...f, source_ip: ip || undefined }))}
         />
 
         <div
