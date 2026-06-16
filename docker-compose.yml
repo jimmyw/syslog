@@ -50,6 +50,7 @@ services:
     restart: unless-stopped
     depends_on:
       - clickhouse
+      - mcp-server
     # No host port — traffic comes through oauth2-proxy only
     networks:
       default:
@@ -84,17 +85,14 @@ services:
 
   # ─── MCP Server ────────────────────────────────────────────────────────────
   mcp-server:
-    build: ./mcp-server
+    build: ./frontend/server/mcp
     restart: unless-stopped
     environment:
       CLICKHOUSE_HOST: clickhouse
     depends_on:
       clickhouse:
         condition: service_healthy
-    stdin_open: true    # MCP uses stdio transport
-    tty: false
-    # Not exposed on any port — accessed via 'docker exec' or 'docker attach'
-    # or via the Claude Desktop MCP config below
+    # Accessible via nginx at /mcp — no host port needed
     networks:
       default:
         ipv4_address: 192.168.10.23

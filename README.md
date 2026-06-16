@@ -15,12 +15,17 @@ Remote devices (UDP/TCP :514)
     ClickHouse              Columnar DB, LZ4+ZSTD
   (port 8123/9000)         Partitioned by month, 90d TTL
         │
+        ▼
+    frontend               nginx — serves SPA + proxies /ch, /poll, /mcp
+        │
+        ▼
+  oauth2-proxy             GitHub OAuth — protects all HTTP endpoints
+  (public :80)
+        │
    ┌────┴────┐
    │         │
-frontend   mcp-server
-(:8080)    (stdio)
-nginx      Node.js MCP server
-           5 tools
+ browser  mcp-server       HTTP MCP server (Streamable HTTP transport)
+           /mcp             5 tools, auth via _syslog session cookie
 ```
 
 ## Quick start
@@ -67,36 +72,79 @@ log { source(src); destination(d_remote); };
 
 ## MCP Server
 
-The MCP server uses stdio transport. Add to your Claude Desktop config:
+The MCP server runs as an HTTP service behind oauth2-proxy, reachable at `/mcp` on the same domain as the frontend. Authentication uses the same GitHub OAuth session cookie as the browser.
+
+### 1. Get a session token
+
+Run `stream_host.py` once to authenticate and save a token:
+
+```bash
+python stream_host.py --logout  # clear any stale token
+python stream_host.py           # opens browser, saves token, then Ctrl+C
+```
+
+The token is stored at `~/.config/syslog-stream/token-<hash>`. Read it:
+
+```bash
+cat ~/.config/syslog-stream/token-*
+```
+
+### 2. Configure Claude Code
+
+Add to `.claude/mcp.json` in your project, or to `~/.claude/mcp.json` for global access:
 
 ```json
 {
   "mcpServers": {
     "syslog": {
-      "command": "docker",
-      "args": ["compose", "-f", "/path/to/syslog-stack/docker-compose.yml",
-               "exec", "-T", "mcp-server", "node", "index.js"]
+      "type": "http",
+      "url": "https://syslog.wennlund.nu/mcp",
+      "headers": {
+        "Cookie": "_syslog=<paste token here>"
+      }
     }
   }
 }
 ```
 
-### Available MCP tools
+### 3. Configure Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "syslog": {
+      "type": "http",
+      "url": "https://syslog.wennlund.nu/mcp",
+      "headers": {
+        "Cookie": "_syslog=<paste token here>"
+      }
+    }
+  }
+}
+```
+
+### Token expiry
+
+The `_syslog` session cookie expires after 7 days. When it does, re-run `stream_host.py` to get a fresh token and update the MCP config.
+
+### Available tools
 
 | Tool | Description |
 |------|-------------|
 | `query_logs` | Flexible log query with filters (host, app, severity, message, time range) |
 | `get_stats` | Aggregated counts by host / severity / app / hour |
-| `list_hosts` | All known hosts with last-seen, total count, error count |
+| `list_hosts` | All known hosts with last-seen and total count |
 | `get_log_rate` | Time-series ingestion rate (minute/hour/day buckets) |
 | `search_errors` | Recent errors/critical/alerts across all hosts |
 
-### Example MCP prompts
+### Example prompts
 
-- *"Show me all errors from esp32 devices in the last hour"*
+- *"Show me all errors from the ec6260604234 host in the last hour"*
 - *"Which host is generating the most logs today?"*
-- *"Are there any critical logs from host terra?"*
 - *"Show me the log rate for the last 24 hours"*
+- *"Are there any critical or emergency logs in the past 30 minutes?"*
 
 ## ClickHouse schema
 
