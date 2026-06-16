@@ -31,17 +31,19 @@ const SEV_COLOR = {
 };
 const SEV_ORDER = ["emerg","alert","crit","err","warning","notice","info","debug"];
 const SEV_MAX = { emerg:0, alert:1, crit:2, err:3, warning:4, notice:5, info:6, debug:7 };
+const SEV_ABBR = { emerg:"EMRG", alert:"ALRT", crit:"CRIT", err:"ERRO", warning:"WARN", notice:"NOTE", info:"INFO", debug:"DEBG" };
 
 function SevBadge({ name }) {
   return (
     <span style={{
-      fontSize: 10, fontWeight: 700, letterSpacing: "0.06em",
-      padding: "1px 5px", borderRadius: 3,
+      fontSize: 10, fontWeight: 700,
+      fontFamily: "monospace",
+      display: "inline-block", width: "3.2em", textAlign: "center",
+      padding: "1px 0", borderRadius: 3,
       background: SEV_COLOR[name] || "#444",
       color: ["emerg","alert","crit","err"].includes(name) ? "#fff" : name === "warning" ? "#000" : "#fff",
-      textTransform: "uppercase",
       flexShrink: 0,
-    }}>{name}</span>
+    }}>{SEV_ABBR[name] || name.slice(0,4).toUpperCase()}</span>
   );
 }
 
