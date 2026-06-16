@@ -665,6 +665,20 @@ func looksLikeHostname(s string) bool {
 	if strings.ContainsAny(s, ".-") {
 		return true
 	}
+	// Hex string of 6+ chars: Docker short container IDs (ec6260604234),
+	// MAC-derived device names, etc.
+	if len(s) >= 6 {
+		allHex := true
+		for _, c := range s {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+				allHex = false
+				break
+			}
+		}
+		if allHex {
+			return true
+		}
+	}
 	// Reject plain words — likely the start of a message from a device
 	// that omits the hostname field.
 	return false

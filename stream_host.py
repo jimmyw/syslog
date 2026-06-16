@@ -188,7 +188,10 @@ def poll_once(base_url, opener, seq=None):
 
 def format_log(log, color=True):
     ts       = log.get("received_at", "")[:19]
-    hostname = log.get("hostname") or log.get("source_ip", "?")
+    src      = log.get("source_ip", "")
+    hn       = log.get("hostname", "")
+    hostname = hn or src or "?"
+    ip_tag   = f" ({src})" if src and src != hostname else ""
     app      = log.get("app_name", "-")
     pid      = log.get("proc_id", "")
     sev      = log.get("severity_name", "info").lower()
@@ -197,15 +200,18 @@ def format_log(log, color=True):
 
     if color:
         c = SEVERITY_COLORS.get(sev, "")
-        return f"{DIM}{ts}{RESET}  {BOLD}{hostname}{RESET}  {app}{proc}  {c}[{sev}]  {msg}{RESET}"
-    return f"{ts}  {hostname}  {app}{proc}  [{sev}]  {msg}"
+        return f"{DIM}{ts}{RESET}  {BOLD}{hostname}{RESET}{DIM}{ip_tag}{RESET}  {app}{proc}  {c}[{sev}]  {msg}{RESET}"
+    return f"{ts}  {hostname}{ip_tag}  {app}{proc}  [{sev}]  {msg}"
 
 
 def host_matches(log, host):
     hn = log.get("hostname", "").lower()
     ip = log.get("source_ip", "")
+    ap = log.get("app_name", "").lower()
     h  = host.lower()
-    return hn == h or ip == host or hn.startswith(h + ".") or hn.startswith(h)
+    return (hn == h or hn.startswith(h + ".") or hn.startswith(h)
+            or ip == host
+            or ap == h or ap.startswith(h + " "))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -252,7 +258,7 @@ def main():
         )
         if hosts:
             clauses = " OR ".join(
-                "(lower(hostname) LIKE lower('{h}%') OR source_ip = '{h}')".format(h=h.replace("'", "''"))
+                "(lower(hostname) LIKE lower('{h}%') OR source_ip = '{h}' OR lower(app_name) = lower('{h}') OR lower(app_name) LIKE lower('{h} %'))".format(h=h.replace("'", "''"))
                 for h in hosts
             )
             sql += f" AND ({clauses})"
