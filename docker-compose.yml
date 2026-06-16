@@ -62,7 +62,7 @@ services:
     restart: unless-stopped
     command:
       - --provider=github
-      - --scope=user:email
+      - --scope=user:email read:org
       - --github-user=${GITHUB_ALLOWED_USERS}
       - --email-domain=*
       - --upstream=http://frontend:80
@@ -70,6 +70,7 @@ services:
       - --redirect-url=https://syslog.wennlund.nu/oauth2/callback
       - --skip-provider-button=true
       - --cookie-secure=true
+      - --cookie-samesite=none
       - --cookie-name=_syslog
       - --cookie-expire=2160h
       - --whitelist-domain=localhost
