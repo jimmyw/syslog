@@ -1,6 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api, buildLogsSQL } from "./api";
 
+function filtersFromURL() {
+  const p = new URLSearchParams(location.search);
+  const f = { since: p.get("since") || "1h" };
+  if (p.get("hostname"))          f.hostname          = p.get("hostname");
+  if (p.get("source_ip"))         f.source_ip         = p.get("source_ip");
+  if (p.get("app_name"))          f.app_name          = p.get("app_name");
+  if (p.get("message_contains"))  f.message_contains  = p.get("message_contains");
+  const sev = p.get("severity_max");
+  if (sev !== null && sev !== "") f.severity_max       = parseInt(sev, 10);
+  return f;
+}
+
 function sinceToMs(since) {
   const m = (since || "1h").match(/^(\d+)([mhd])$/);
   if (!m) return 3_600_000;
@@ -271,9 +283,9 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [hosts, setHosts] = useState([]);
   const [stats, setStats] = useState(null);
-  const [filters, setFilters] = useState({ since: "1h" });
+  const [filters, setFilters] = useState(filtersFromURL);
   const [loading, setLoading] = useState(false);
-  const [liveMode, setLiveMode] = useState(false);
+  const [liveMode, setLiveMode] = useState(() => new URLSearchParams(location.search).get("live") === "1");
   const [autoScroll, setAutoScroll] = useState(true);
   const [clearedAt, setClearedAt] = useState(null);
   const [showSql, setShowSql] = useState(false);
@@ -284,6 +296,19 @@ export default function App() {
   useEffect(() => { clearedAtRef.current = clearedAt; }, [clearedAt]);
   useEffect(() => { filtersRef.current = filters; }, [filters]);
   useEffect(() => { setSql(buildLogsSQL({ ...filters, from: clearedAt })); }, [filters, clearedAt]);
+
+  useEffect(() => {
+    const p = new URLSearchParams();
+    if (filters.since && filters.since !== "1h") p.set("since", filters.since);
+    if (filters.hostname)          p.set("hostname",          filters.hostname);
+    if (filters.source_ip)         p.set("source_ip",         filters.source_ip);
+    if (filters.app_name)          p.set("app_name",          filters.app_name);
+    if (filters.message_contains)  p.set("message_contains",  filters.message_contains);
+    if (filters.severity_max != null) p.set("severity_max",   filters.severity_max);
+    if (liveMode)                  p.set("live",              "1");
+    const qs = p.toString();
+    history.replaceState(null, "", qs ? `?${qs}` : location.pathname);
+  }, [filters, liveMode]);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
