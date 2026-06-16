@@ -107,31 +107,27 @@ function HostList({ hosts, selectedSourceIP, onSelect }) {
             key={h.source_ip}
             onClick={() => onSelect(h.source_ip)}
             style={{
-              padding: "5px 12px", cursor: "pointer", fontSize: 12,
+              padding: "5px 12px 6px", cursor: "pointer", fontSize: 12,
               background: selectedSourceIP === h.source_ip ? "#2c2c2e" : "transparent",
               color: "#ebebf5",
-              display: "flex", justifyContent: "space-between", alignItems: "center",
-              gap: 4,
             }}
           >
-            <div style={{ overflow: "hidden", flex: 1, minWidth: 0 }}>
-              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>
-                {label}
-              </div>
-              {sublabel && (
-                <div style={{ fontSize: 10, color: "#48484a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {sublabel}
-                </div>
-              )}
+            <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>
+              {label}
             </div>
-            <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            {sublabel && (
+              <div style={{ fontSize: 10, color: "#636366", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {sublabel}
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 4, marginTop: 2 }}>
               {parseInt(h.error_count) > 0 && (
-                <span style={{ fontSize: 10, background: "#ff3b30", color: "#fff", borderRadius: 3, padding: "0 4px" }}>
+                <span style={{ fontSize: 10, background: "#ff3b30", color: "#fff", borderRadius: 3, padding: "0 4px", lineHeight: "14px" }}>
                   {h.error_count}
                 </span>
               )}
               <span style={{ fontSize: 10, color: "#48484a" }}>{parseInt(h.total).toLocaleString()}</span>
-            </span>
+            </div>
           </div>
         );
       })}
