@@ -128,7 +128,7 @@ def browser_login(base_url):
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     rd  = urllib.parse.quote(f"http://localhost:{port}/callback", safe="")
-    url = f"{base_url}/oauth2/start?rd={rd}"
+    url = f"{base_url}/oauth2/sign_in?rd={rd}"
     print("Opening browser for GitHub login…", flush=True)
     webbrowser.open(url)
 
