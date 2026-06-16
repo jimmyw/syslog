@@ -127,7 +127,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 
 ### Token expiry
 
-The `_syslog` session cookie expires after 7 days. When it does, re-run `stream_host.py` to get a fresh token and update the MCP config.
+The `_syslog` session cookie expires after 90 days. When it does, re-run `stream_host.py` to get a fresh token and update the MCP config.
 
 ### Available tools
 

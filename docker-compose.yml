@@ -68,6 +68,7 @@ services:
       - --skip-provider-button=true
       - --cookie-secure=true
       - --cookie-name=_syslog
+      - --cookie-expire=2160h
       - --email-domain=*
       - --whitelist-domain=localhost
     environment:
