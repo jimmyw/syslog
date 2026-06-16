@@ -344,6 +344,13 @@ func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
 			return
 		}
 
+		burstMs := 100
+		if b := r.URL.Query().Get("burst"); b != "" {
+			if n, err := strconv.Atoi(b); err == nil && n >= 0 {
+				burstMs = n
+			}
+		}
+
 		// Fast path: entries already in the store.
 		if entries, nextSeq := store.since(afterSeq); len(entries) > 0 {
 			json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
@@ -367,20 +374,24 @@ func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
 
 		select {
 		case <-ch:
+			// First entry arrived — wait burstMs for more to accumulate.
+			coalesce := time.NewTimer(time.Duration(burstMs) * time.Millisecond)
+			defer coalesce.Stop()
+		drain:
+			for {
+				select {
+				case <-ch:
+				case <-coalesce.C:
+					break drain
+				case <-r.Context().Done():
+					return
+				}
+			}
 		case <-timeout.C:
 		case <-r.Context().Done():
 			return
 		}
 
-		// Drain any additional signals that piled up.
-		for {
-			select {
-			case <-ch:
-			default:
-				goto respond
-			}
-		}
-	respond:
 		entries, nextSeq := store.since(afterSeq)
 		json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
 	}
