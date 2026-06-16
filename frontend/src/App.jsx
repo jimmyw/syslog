@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api, buildLogsSQL } from "./api";
 
+function sinceToMs(since) {
+  const m = (since || "1h").match(/^(\d+)([mhd])$/);
+  if (!m) return 3_600_000;
+  return parseInt(m[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]];
+}
+
 const SEV_COLOR = {
   emerg:   "#ff2d55",
   alert:   "#ff3b30",
@@ -312,13 +318,16 @@ export default function App() {
           if (!res.ok) { await new Promise(r => setTimeout(r, 1000)); continue; }
           const data = await res.json();
           seq = data.seq;
-          if (!active || !data.logs.length) continue;
+          if (!active) continue;
           setLogs((prev) => {
             const f = filtersRef.current;
             const ca = clearedAtRef.current;
             const caMs = ca ? new Date(ca).getTime() : null;
+            const cutoffMs = Date.now() - sinceToMs(f.since);
             const filtered = data.logs.filter((log) => {
-              if (caMs && new Date(log.received_at).getTime() < caMs) return false;
+              const logMs = new Date(log.received_at).getTime();
+              if (logMs < cutoffMs) return false;
+              if (caMs && logMs < caMs) return false;
               if (f.source_ip && log.source_ip !== f.source_ip) return false;
               if (f.hostname && !log.hostname.toLowerCase().includes(f.hostname.toLowerCase())) return false;
               if (f.app_name && log.app_name !== f.app_name) return false;
@@ -326,9 +335,10 @@ export default function App() {
               if (f.message_contains && !log.message.toLowerCase().includes(f.message_contains.toLowerCase())) return false;
               return true;
             });
-            if (!filtered.length) return prev;
-            const next = [...prev, ...filtered];
-            return next.length > 500 ? next.slice(-500) : next;
+            // Skip work if nothing new and oldest entry is still within the window.
+            if (!filtered.length && (prev.length === 0 || new Date(prev[0].received_at).getTime() >= cutoffMs)) return prev;
+            const combined = [...prev, ...filtered].filter(log => new Date(log.received_at).getTime() >= cutoffMs);
+            return combined.length > 500 ? combined.slice(-500) : combined;
           });
         } catch {
           if (active) await new Promise(r => setTimeout(r, 1000));
@@ -341,7 +351,7 @@ export default function App() {
 
   useEffect(() => {
     if (autoScroll && bottomRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+      bottomRef.current.scrollIntoView({ behavior: "instant" });
     }
   }, [logs, autoScroll]);
 
@@ -422,7 +432,7 @@ export default function App() {
       {/* Auto-scroll indicator */}
       {!autoScroll && (
         <button
-          onClick={() => { setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }}
+          onClick={() => { setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "instant" }); }}
           style={{ ...btnStyle, position: "fixed", bottom: 16, right: 16, background: "#1c1c1e", border: "1px solid #2c2c2e" }}
         >
           ↓ scroll to bottom
