@@ -64,6 +64,7 @@ services:
       - --provider=github
       - --scope=user:email
       - --github-user=${GITHUB_ALLOWED_USERS}
+      - --email-domain=*
       - --upstream=http://frontend:80
       - --http-address=0.0.0.0:80
       - --redirect-url=https://syslog.wennlund.nu/oauth2/callback
