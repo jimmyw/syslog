@@ -307,46 +307,45 @@ export default function App() {
 
   useEffect(() => {
     if (!liveMode) return;
+    let ws = null;
     let active = true;
-    let seq = null;
+    let retryTimer = null;
 
-    (async () => {
-      while (active) {
-        try {
-          const url = seq !== null ? `/poll?seq=${seq}` : "/poll";
-          const res = await fetch(url);
-          if (!res.ok) { await new Promise(r => setTimeout(r, 1000)); continue; }
-          const data = await res.json();
-          seq = data.seq;
-          if (!active) continue;
-          setLogs((prev) => {
-            const f = filtersRef.current;
-            const ca = clearedAtRef.current;
-            const caMs = ca ? new Date(ca).getTime() : null;
-            const cutoffMs = Date.now() - sinceToMs(f.since);
-            const filtered = data.logs.filter((log) => {
-              const logMs = new Date(log.received_at).getTime();
-              if (logMs < cutoffMs) return false;
-              if (caMs && logMs < caMs) return false;
-              if (f.source_ip && log.source_ip !== f.source_ip) return false;
-              if (f.hostname && !log.hostname.toLowerCase().includes(f.hostname.toLowerCase())) return false;
-              if (f.app_name && log.app_name !== f.app_name) return false;
-              if (f.severity_max != null && log.severity > f.severity_max) return false;
-              if (f.message_contains && !log.message.toLowerCase().includes(f.message_contains.toLowerCase())) return false;
-              return true;
-            });
-            // Skip work if nothing new and oldest entry is still within the window.
-            if (!filtered.length && (prev.length === 0 || new Date(prev[0].received_at).getTime() >= cutoffMs)) return prev;
-            const combined = [...prev, ...filtered].filter(log => new Date(log.received_at).getTime() >= cutoffMs);
-            return combined.length > 500 ? combined.slice(-500) : combined;
-          });
-        } catch {
-          if (active) await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-    })();
+    function connect() {
+      if (!active) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${proto}//${location.host}/ws`);
 
-    return () => { active = false; };
+      ws.onmessage = (e) => {
+        const log = JSON.parse(e.data);
+        setLogs((prev) => {
+          const f = filtersRef.current;
+          const ca = clearedAtRef.current;
+          const caMs = ca ? new Date(ca).getTime() : null;
+          const cutoffMs = Date.now() - sinceToMs(f.since);
+          const logMs = new Date(log.received_at).getTime();
+          if (logMs < cutoffMs) return prev;
+          if (caMs && logMs < caMs) return prev;
+          if (f.source_ip && log.source_ip !== f.source_ip) return prev;
+          if (f.hostname && !log.hostname.toLowerCase().includes(f.hostname.toLowerCase())) return prev;
+          if (f.app_name && log.app_name !== f.app_name) return prev;
+          if (f.severity_max != null && log.severity > f.severity_max) return prev;
+          if (f.message_contains && !log.message.toLowerCase().includes(f.message_contains.toLowerCase())) return prev;
+          const combined = [...prev, log].filter(l => new Date(l.received_at).getTime() >= cutoffMs);
+          return combined.length > 500 ? combined.slice(-500) : combined;
+        });
+      };
+
+      ws.onerror = () => ws.close();
+      ws.onclose = () => { if (active) retryTimer = setTimeout(connect, 1000); };
+    }
+
+    connect();
+    return () => {
+      active = false;
+      clearTimeout(retryTimer);
+      ws?.close();
+    };
   }, [liveMode]);
 
   useEffect(() => {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/gorilla/websocket"
 )
 
 type SyslogEntry struct {
@@ -397,6 +398,62 @@ func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
 	}
 }
 
+// ── WebSocket handler ─────────────────────────────────────────────────────────
+//
+// GET /ws upgrades to a WebSocket connection and streams every new log entry
+// as a JSON text frame. Ping frames are sent every 30 s to keep proxies alive.
+
+var wsUpgrader = websocket.Upgrader{
+	// Authentication is handled upstream by oauth2-proxy; allow all origins here.
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func makeWSHandler(hub *Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		conn, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		ch := hub.subscribe()
+		defer hub.unsubscribe(ch)
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		// Read pump: required to process control frames and detect client close.
+		go func() {
+			defer cancel()
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+
+		ping := time.NewTicker(30 * time.Second)
+		defer ping.Stop()
+
+		for {
+			select {
+			case msg := <-ch:
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+					return
+				}
+			case <-ping.C:
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
 // logEvent matches the JSON shape the frontend expects from ClickHouse queries.
 type logEvent struct {
 	ReceivedAt   string `json:"received_at"`
@@ -587,6 +644,7 @@ func main() {
 
 	http.HandleFunc("/stream", hub.streamHandler)
 	http.HandleFunc("/poll", makePollHandler(hub, store))
+	http.HandleFunc("/ws", makeWSHandler(hub))
 	go func() {
 		log.Println("HTTP server listening on :8888")
 		if err := http.ListenAndServe(":8888", nil); err != nil {

@@ -2,7 +2,10 @@ module syslog-receiver
 
 go 1.22
 
-require github.com/ClickHouse/clickhouse-go/v2 v2.23.2
+require (
+	github.com/ClickHouse/clickhouse-go/v2 v2.23.2
+	github.com/gorilla/websocket v1.5.3
+)
 
 require (
 	github.com/ClickHouse/ch-go v0.61.5 // indirect

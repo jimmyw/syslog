@@ -10,11 +10,15 @@ Usage:
 """
 
 import argparse
+import base64
 import http.server
 import json
+import os
 import pathlib
 import re
 import socket
+import ssl
+import struct
 import sys
 import threading
 import time
@@ -176,12 +180,96 @@ def ch_query(base_url, sql, opener):
     return [json.loads(line) for line in text.strip().split("\n") if line]
 
 
-def poll_once(base_url, opener, seq=None):
-    url = f"{base_url}/poll"
-    if seq is not None:
-        url += f"?seq={seq}"
-    with opener.open(url, timeout=35) as resp:
-        return json.loads(resp.read().decode())
+
+# ── WebSocket client (stdlib only) ───────────────────────────────────────────
+
+def _recv_exactly(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("WebSocket connection closed")
+        buf += chunk
+    return buf
+
+
+def _ws_connect(base_url, path, token):
+    parsed = urllib.parse.urlparse(base_url)
+    use_ssl = parsed.scheme in ("https", "wss")
+    host = parsed.hostname
+    port = parsed.port or (443 if use_ssl else 80)
+
+    raw = socket.create_connection((host, port), timeout=15)
+    if use_ssl:
+        ctx = ssl.create_default_context()
+        raw = ctx.wrap_socket(raw, server_hostname=host)
+
+    key = base64.b64encode(os.urandom(16)).decode()
+    raw.sendall((
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        f"Sec-WebSocket-Version: 13\r\n"
+        f"Cookie: _syslog={token}\r\n"
+        f"\r\n"
+    ).encode())
+
+    response = b""
+    while b"\r\n\r\n" not in response:
+        response += raw.recv(4096)
+    status = response.split(b"\r\n")[0].decode()
+    if "101" not in status:
+        raise ConnectionError(f"WebSocket upgrade failed: {status}")
+    return raw
+
+
+def _ws_read_frame(sock):
+    """Return (opcode, payload) for one frame."""
+    header = _recv_exactly(sock, 2)
+    opcode = header[0] & 0x0F
+    masked = (header[1] & 0x80) != 0
+    length = header[1] & 0x7F
+    if length == 126:
+        length = struct.unpack(">H", _recv_exactly(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack(">Q", _recv_exactly(sock, 8))[0]
+    mask = _recv_exactly(sock, 4) if masked else None
+    payload = _recv_exactly(sock, length)
+    if mask:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+
+def _ws_send_frame(sock, opcode, payload=b""):
+    mask = os.urandom(4)
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    header = bytes([0x80 | opcode, 0x80 | len(payload)]) + mask
+    sock.sendall(header + masked)
+
+
+def ws_stream(base_url, token, hosts, color):
+    """Connect to /ws and print matching log entries until KeyboardInterrupt."""
+    while True:
+        try:
+            sock = _ws_connect(base_url, "/ws", token)
+            while True:
+                opcode, payload = _ws_read_frame(sock)
+                if opcode == 0x8:   # close
+                    break
+                if opcode == 0x9:   # ping → pong
+                    _ws_send_frame(sock, 0xA, payload)
+                    continue
+                if opcode == 0x1:   # text frame
+                    log = json.loads(payload.decode())
+                    if not hosts or any(host_matches(log, h) for h in hosts):
+                        print(format_log(log, color), flush=True)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(f"WebSocket error (retrying in 3s): {e}", file=sys.stderr)
+            time.sleep(3)
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
@@ -280,30 +368,14 @@ def main():
         except Exception as e:
             print(f"Warning: could not fetch historical logs: {e}", file=sys.stderr)
 
-    # --- Live poll loop ---
-    try:
-        data = poll_once(base_url, opener)
-        seq  = data.get("seq", 0)
-    except Exception as e:
-        print(f"Error: could not connect to {base_url}/poll: {e}", file=sys.stderr)
-        sys.exit(1)
-
+    # --- Live WebSocket stream ---
     hint = f"Streaming {' | '.join(hosts)} — Ctrl+C to stop" if hosts else "Streaming all hosts — Ctrl+C to stop"
     print(f"{DIM}{hint}{RESET}" if color else hint, flush=True)
 
-    while True:
-        try:
-            data = poll_once(base_url, opener, seq=seq)
-            seq  = data.get("seq", seq)
-            for log in data.get("logs", []):
-                if not hosts or any(host_matches(log, h) for h in hosts):
-                    print(format_log(log, color), flush=True)
-        except KeyboardInterrupt:
-            print("\nStopped.", file=sys.stderr)
-            break
-        except Exception as e:
-            print(f"Poll error (retrying in 3s): {e}", file=sys.stderr)
-            time.sleep(3)
+    try:
+        ws_stream(base_url, token, hosts, color)
+    except KeyboardInterrupt:
+        print("\nStopped.", file=sys.stderr)
 
 
 if __name__ == "__main__":

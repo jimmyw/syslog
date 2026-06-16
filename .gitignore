@@ -1,2 +1,3 @@
 .env
 .bash_history
+__pycache__
