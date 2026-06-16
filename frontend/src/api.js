@@ -53,7 +53,16 @@ export const api = {
     return chQuery(sql.trim());
   },
 
-  async getHosts() {
+  async getHosts({ hostname, app_name, severity_max, message_contains, since = "1h", from, until } = {}) {
+    const sinceExpr = from
+      ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
+      : (relativeToSQL(since) || `'${since}'`);
+    const where = [`received_at >= ${sinceExpr}`];
+    if (until) where.push(`received_at <= '${until}'`);
+    if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
+    if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);
+    if (severity_max !== undefined && severity_max !== null) where.push(`severity <= ${severity_max}`);
+    if (message_contains) where.push(`positionCaseInsensitive(message, '${message_contains.replace(/'/g, "''")}') > 0`);
     return chQuery(`
       SELECT
         source_ip,
@@ -62,7 +71,7 @@ export const api = {
         max(received_at) AS last_seen,
         countIf(severity <= 3) AS error_count
       FROM syslog.logs
-      WHERE received_at >= now() - INTERVAL 7 DAY
+      WHERE ${where.join("\n        AND ")}
       GROUP BY source_ip
       ORDER BY last_seen DESC
     `);

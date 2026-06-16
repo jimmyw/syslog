@@ -284,7 +284,7 @@ export default function App() {
     try {
       const [logData, hostData, statsData] = await Promise.all([
         api.getLogs({ ...filters, from: clearedAt }),
-        api.getHosts(),
+        api.getHosts({ ...filters, source_ip: undefined, from: clearedAt }),
         api.getStats(filters.since || "1h"),
       ]);
       setLogs(logData.reverse());

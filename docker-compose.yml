@@ -50,11 +50,36 @@ services:
     restart: unless-stopped
     depends_on:
       - clickhouse
-    ports:
-      - "8080:80"
+    # No host port — traffic comes through oauth2-proxy only
     networks:
       default:
         ipv4_address: 192.168.10.22
+
+  # ─── OAuth2 Proxy (GitHub) ─────────────────────────────────────────────────
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    restart: unless-stopped
+    command:
+      - --provider=github
+      - --upstream=http://frontend:80
+      - --http-address=0.0.0.0:80
+      - --redirect-url=https://syslog.wennlund.nu/oauth2/callback
+      - --skip-provider-button=true
+      - --cookie-secure=true
+      - --cookie-name=_syslog
+      - --email-domain=*
+      - --whitelist-domain=localhost
+    environment:
+      OAUTH2_PROXY_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_COOKIE_SECRET}
+    depends_on:
+      - frontend
+    ports:
+      - "8080:4180"
+    networks:
+      default:
+        ipv4_address: 192.168.10.24
 
 
   # ─── MCP Server ────────────────────────────────────────────────────────────
