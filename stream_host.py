@@ -99,15 +99,7 @@ def browser_login(base_url):
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
-
-            if parsed.path == "/callback":
-                # Bounce the browser to the syslog server so it sends its cookie
-                cb = urllib.parse.quote(f"http://localhost:{port}/done", safe="")
-                self.send_response(302)
-                self.send_header("Location", f"{base_url}/api/cli-token?cb={cb}")
-                self.end_headers()
-
-            elif parsed.path == "/done":
+            if parsed.path == "/done":
                 params = dict(urllib.parse.parse_qsl(parsed.query))
                 token  = params.get("token", "")
                 captured.append(token)
@@ -116,7 +108,6 @@ def browser_login(base_url):
                 self.end_headers()
                 self.wfile.write(b"<h2>Logged in. You can close this tab.</h2>")
                 done.set()
-
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -127,8 +118,8 @@ def browser_login(base_url):
     server = http.server.HTTPServer(("localhost", port), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    rd  = urllib.parse.quote(f"http://localhost:{port}/callback", safe="")
-    url = f"{base_url}/oauth2/sign_in?rd={rd}"
+    cb  = urllib.parse.quote(f"http://localhost:{port}/done", safe=":/")
+    url = f"{base_url}/api/cli-token?cb={cb}"
     print("Opening browser for GitHub login…", flush=True)
     webbrowser.open(url)
 
@@ -225,8 +216,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("host", nargs="?", default=None,
-                        help="Hostname or source IP to filter on (omit to stream all hosts)")
+    parser.add_argument("host", nargs="*", default=None,
+                        help="Hostname(s) or IP(s) to filter on — multiple values are ORed (omit to stream all hosts)")
     parser.add_argument("--url", default=DEFAULT_URL, metavar="URL",
                         help=f"Frontend base URL (default: {DEFAULT_URL})")
     parser.add_argument("--tail", type=int, default=20, metavar="N",
@@ -240,7 +231,7 @@ def main():
     args = parser.parse_args()
 
     base_url = args.url.rstrip("/")
-    host     = args.host
+    hosts    = args.host or []
     color    = not args.no_color and sys.stdout.isatty()
 
     if args.logout:
@@ -259,9 +250,12 @@ def main():
             "FROM syslog.logs "
             f"WHERE received_at >= {since_expr}"
         )
-        if host:
-            h   = host.replace("'", "''")
-            sql += f" AND (lower(hostname) LIKE lower('{h}%') OR source_ip = '{h}')"
+        if hosts:
+            clauses = " OR ".join(
+                "(lower(hostname) LIKE lower('{h}%') OR source_ip = '{h}')".format(h=h.replace("'", "''"))
+                for h in hosts
+            )
+            sql += f" AND ({clauses})"
         sql += f" ORDER BY received_at DESC LIMIT {args.tail}"
 
         try:
@@ -275,7 +269,7 @@ def main():
                 live_sep = f"{DIM}--- live ---{RESET}" if color else "--- live ---"
                 print(live_sep, flush=True)
             else:
-                target = f"'{host}'" if host else "any host"
+                target = " or ".join(f"'{h}'" for h in hosts) if hosts else "any host"
                 print(f"(no logs found for {target} in the last {args.since})", flush=True)
         except Exception as e:
             print(f"Warning: could not fetch historical logs: {e}", file=sys.stderr)
@@ -288,7 +282,7 @@ def main():
         print(f"Error: could not connect to {base_url}/poll: {e}", file=sys.stderr)
         sys.exit(1)
 
-    hint = f"Streaming '{host}' — Ctrl+C to stop" if host else "Streaming all hosts — Ctrl+C to stop"
+    hint = f"Streaming {' | '.join(hosts)} — Ctrl+C to stop" if hosts else "Streaming all hosts — Ctrl+C to stop"
     print(f"{DIM}{hint}{RESET}" if color else hint, flush=True)
 
     while True:
@@ -296,7 +290,7 @@ def main():
             data = poll_once(base_url, opener, seq=seq)
             seq  = data.get("seq", seq)
             for log in data.get("logs", []):
-                if host is None or host_matches(log, host):
+                if not hosts or any(host_matches(log, h) for h in hosts):
                     print(format_log(log, color), flush=True)
         except KeyboardInterrupt:
             print("\nStopped.", file=sys.stderr)
