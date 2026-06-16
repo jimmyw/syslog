@@ -62,6 +62,8 @@ services:
     restart: unless-stopped
     command:
       - --provider=github
+      - --scope=user:email
+      - --github-user=${GITHUB_ALLOWED_USERS}
       - --upstream=http://frontend:80
       - --http-address=0.0.0.0:80
       - --redirect-url=https://syslog.wennlund.nu/oauth2/callback
@@ -69,7 +71,6 @@ services:
       - --cookie-secure=true
       - --cookie-name=_syslog
       - --cookie-expire=2160h
-      - --email-domain=*
       - --whitelist-domain=localhost
     environment:
       OAUTH2_PROXY_CLIENT_ID: ${GITHUB_CLIENT_ID}
