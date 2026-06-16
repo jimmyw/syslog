@@ -313,24 +313,26 @@ export default function App() {
 
     function connect() {
       if (!active) return;
+      const f = filtersRef.current;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      ws = new WebSocket(`${proto}//${location.host}/ws`);
+      const params = new URLSearchParams();
+      if (f.hostname)         params.set("hostname",         f.hostname);
+      if (f.source_ip)        params.set("source_ip",        f.source_ip);
+      if (f.app_name)         params.set("app_name",         f.app_name);
+      if (f.message_contains) params.set("message_contains", f.message_contains);
+      if (f.severity_max != null) params.set("severity_max", f.severity_max);
+      const qs = params.toString();
+      ws = new WebSocket(`${proto}//${location.host}/ws${qs ? "?" + qs : ""}`);
 
       ws.onmessage = (e) => {
         const log = JSON.parse(e.data);
         setLogs((prev) => {
-          const f = filtersRef.current;
           const ca = clearedAtRef.current;
           const caMs = ca ? new Date(ca).getTime() : null;
-          const cutoffMs = Date.now() - sinceToMs(f.since);
+          const cutoffMs = Date.now() - sinceToMs(filtersRef.current.since);
           const logMs = new Date(log.received_at).getTime();
           if (logMs < cutoffMs) return prev;
           if (caMs && logMs < caMs) return prev;
-          if (f.source_ip && log.source_ip !== f.source_ip) return prev;
-          if (f.hostname && !log.hostname.toLowerCase().includes(f.hostname.toLowerCase())) return prev;
-          if (f.app_name && log.app_name !== f.app_name) return prev;
-          if (f.severity_max != null && log.severity > f.severity_max) return prev;
-          if (f.message_contains && !log.message.toLowerCase().includes(f.message_contains.toLowerCase())) return prev;
           const combined = [...prev, log].filter(l => new Date(l.received_at).getTime() >= cutoffMs);
           return combined.length > 500 ? combined.slice(-500) : combined;
         });
@@ -346,7 +348,7 @@ export default function App() {
       clearTimeout(retryTimer);
       ws?.close();
     };
-  }, [liveMode]);
+  }, [liveMode, filters]);
 
   useEffect(() => {
     if (autoScroll && bottomRef.current) {

@@ -297,12 +297,16 @@ func (h *Hub) streamHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	filter := parseWSFilter(r)
 	ch := h.subscribe()
 	defer h.unsubscribe(ch)
 
 	for {
 		select {
 		case msg := <-ch:
+			if !filter.matches(msg) {
+				continue
+			}
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
 		case <-r.Context().Done():
@@ -331,6 +335,8 @@ func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
+		filter := parseWSFilter(r)
+
 		seqStr := r.URL.Query().Get("seq")
 
 		// Bootstrap: no cursor yet — return current seq so client can start from now.
@@ -352,9 +358,22 @@ func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
 			}
 		}
 
+		applyFilter := func(entries []json.RawMessage) []json.RawMessage {
+			if filter.hostname == "" && filter.sourceIP == "" && filter.appName == "" && filter.messageContains == "" && filter.severityMax < 0 {
+				return entries
+			}
+			out := entries[:0:0]
+			for _, e := range entries {
+				if filter.matches(string(e)) {
+					out = append(out, e)
+				}
+			}
+			return out
+		}
+
 		// Fast path: entries already in the store.
 		if entries, nextSeq := store.since(afterSeq); len(entries) > 0 {
-			json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
+			json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: applyFilter(entries)})
 			return
 		}
 
@@ -365,7 +384,7 @@ func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
 		// Second check: an entry may have been stored between the first check
 		// and subscribe().
 		if entries, nextSeq := store.since(afterSeq); len(entries) > 0 {
-			json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
+			json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: applyFilter(entries)})
 			return
 		}
 
@@ -394,18 +413,77 @@ func makePollHandler(hub *Hub, store *Store) http.HandlerFunc {
 		}
 
 		entries, nextSeq := store.since(afterSeq)
-		json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: entries})
+		json.NewEncoder(w).Encode(pollResponse{Seq: nextSeq, Logs: applyFilter(entries)})
 	}
 }
 
 // ── WebSocket handler ─────────────────────────────────────────────────────────
 //
-// GET /ws upgrades to a WebSocket connection and streams every new log entry
-// as a JSON text frame. Ping frames are sent every 30 s to keep proxies alive.
+// GET /ws upgrades to a WebSocket connection and streams new log entries as
+// JSON text frames. Supported query parameters (all optional):
+//
+//	hostname        – case-insensitive substring match on hostname
+//	source_ip       – exact match on source IP
+//	app_name        – case-insensitive exact match on app name
+//	message_contains – case-insensitive substring match on message
+//	severity_max    – integer 0–7; only entries with severity ≤ this pass
+//
+// Ping frames are sent every 30 s to keep proxies alive.
 
 var wsUpgrader = websocket.Upgrader{
 	// Authentication is handled upstream by oauth2-proxy; allow all origins here.
 	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type wsFilter struct {
+	hostname        string
+	sourceIP        string
+	appName         string
+	messageContains string
+	severityMax     int // -1 = unset
+}
+
+func parseWSFilter(r *http.Request) wsFilter {
+	q := r.URL.Query()
+	f := wsFilter{
+		hostname:        strings.ToLower(q.Get("hostname")),
+		sourceIP:        q.Get("source_ip"),
+		appName:         strings.ToLower(q.Get("app_name")),
+		messageContains: strings.ToLower(q.Get("message_contains")),
+		severityMax:     -1,
+	}
+	if s := q.Get("severity_max"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 && n <= 7 {
+			f.severityMax = n
+		}
+	}
+	return f
+}
+
+func (f wsFilter) matches(msg string) bool {
+	if f.hostname == "" && f.sourceIP == "" && f.appName == "" && f.messageContains == "" && f.severityMax < 0 {
+		return true
+	}
+	var e logEvent
+	if err := json.Unmarshal([]byte(msg), &e); err != nil {
+		return true
+	}
+	if f.hostname != "" && !strings.Contains(strings.ToLower(e.Hostname), f.hostname) {
+		return false
+	}
+	if f.sourceIP != "" && e.SourceIP != f.sourceIP {
+		return false
+	}
+	if f.appName != "" && strings.ToLower(e.AppName) != f.appName {
+		return false
+	}
+	if f.messageContains != "" && !strings.Contains(strings.ToLower(e.Message), f.messageContains) {
+		return false
+	}
+	if f.severityMax >= 0 && int(e.Severity) > f.severityMax {
+		return false
+	}
+	return true
 }
 
 func makeWSHandler(hub *Hub) http.HandlerFunc {
@@ -415,6 +493,8 @@ func makeWSHandler(hub *Hub) http.HandlerFunc {
 			return
 		}
 		defer conn.Close()
+
+		filter := parseWSFilter(r)
 
 		ch := hub.subscribe()
 		defer hub.unsubscribe(ch)
@@ -438,6 +518,9 @@ func makeWSHandler(hub *Hub) http.HandlerFunc {
 		for {
 			select {
 			case msg := <-ch:
+				if !filter.matches(msg) {
+					continue
+				}
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 					return

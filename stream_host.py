@@ -249,11 +249,33 @@ def _ws_send_frame(sock, opcode, payload=b""):
     sock.sendall(header + masked)
 
 
+def _ws_path(hosts):
+    """Build /ws path with server-side filter params.
+
+    Single host: sent as hostname= or source_ip= so the server pre-filters.
+    Multiple hosts: no server param (OR logic unsupported); client filters instead.
+    """
+    if len(hosts) != 1:
+        return "/ws"
+    h = hosts[0]
+    # Bare IPv4 address → filter by source_ip (exact); otherwise hostname (substring).
+    try:
+        socket.inet_aton(h)
+        key = "source_ip"
+    except OSError:
+        key = "hostname"
+    return f"/ws?{urllib.parse.urlencode({key: h})}"
+
+
 def ws_stream(base_url, token, hosts, color):
     """Connect to /ws and print matching log entries until KeyboardInterrupt."""
+    path = _ws_path(hosts)
+    # For multiple hosts the server sends everything; client applies host_matches.
+    client_filter = len(hosts) > 1
+
     while True:
         try:
-            sock = _ws_connect(base_url, "/ws", token)
+            sock = _ws_connect(base_url, path, token)
             while True:
                 opcode, payload = _ws_read_frame(sock)
                 if opcode == 0x8:   # close
@@ -263,8 +285,9 @@ def ws_stream(base_url, token, hosts, color):
                     continue
                 if opcode == 0x1:   # text frame
                     log = json.loads(payload.decode())
-                    if not hosts or any(host_matches(log, h) for h in hosts):
-                        print(format_log(log, color), flush=True)
+                    if client_filter and not any(host_matches(log, h) for h in hosts):
+                        continue
+                    print(format_log(log, color), flush=True)
         except KeyboardInterrupt:
             raise
         except Exception as e:
