@@ -23,7 +23,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "query_logs",
       description:
-        "Query syslog entries with flexible filters. Returns structured log rows.",
+        "Query syslog entries with flexible filters. Returns structured log rows. " +
+        "Use `since`+`until` to inspect a specific time window (capped at 1000 rows). " +
+        "For a full bulk download of a window for local analysis (no row cap, gzip-" +
+        "compressed transfer), run the CLI instead: " +
+        "`python stream_host.py <host> --since 6h --export logs.jsonl --format jsonl`.",
       inputSchema: {
         type: "object",
         properties: {

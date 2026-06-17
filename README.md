@@ -70,6 +70,45 @@ destination d_remote {
 log { source(src); destination(d_remote); };
 ```
 
+## CLI (`stream_host.py`)
+
+A stdlib-only client for live tailing and bulk export. First run opens a browser
+for GitHub OAuth and caches the session token (see [token expiry](#token-expiry)).
+
+```bash
+# Live stream (optionally filtered to host(s)/IP(s); multiple are ORed)
+python stream_host.py                       # all hosts
+python stream_host.py ec6260604234          # one host
+python stream_host.py ec6260604234 --since 6h --tail 50
+```
+
+### Bulk export
+
+Download a host + time window to a local file for offline analysis. The transfer
+is gzip-compressed (ClickHouse `enable_http_compression`), so even large windows
+move fast — a 6 h window of a chatty device (~370k rows, 84 MB) is ~3.5 MB on the
+wire and lands in about a second.
+
+```bash
+# Human-readable text (same format as the live stream)
+python stream_host.py ec6260604234 --since 6h --export logs.txt
+
+# Raw JSON lines (one row per line, for jq/pandas)
+python stream_host.py ec6260604234 --since 6h --export logs.jsonl --format jsonl
+
+# Keep the file compressed on disk too (just give a .gz path)
+python stream_host.py ec6260604234 --since 24h --export logs.jsonl.gz --format jsonl
+
+# Bounded window with --until
+python stream_host.py ec6260604234 --since 2d --until 1d --export window.jsonl --format jsonl
+```
+
+Flags: `--since` / `--until` (relative `5m,6h,2d` or ISO8601), `--format text|jsonl`,
+`--limit N`, `--no-compress`. Output is gzipped automatically when the path ends in `.gz`.
+
+> The MCP `query_logs` tool is capped at 1000 rows and is meant for interactive
+> querying; use this CLI export for full windows / local file analysis.
+
 ## MCP Server
 
 The MCP server runs as an HTTP service behind oauth2-proxy, reachable at `/mcp` on the same domain as the frontend. Authentication uses the same GitHub OAuth session cookie as the browser.
