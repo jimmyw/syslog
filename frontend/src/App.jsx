@@ -19,6 +19,16 @@ function sinceToMs(since) {
   return parseInt(m[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]];
 }
 
+// Parse a log timestamp to epoch ms. ClickHouse returns naive UTC strings
+// ("2026-06-18 12:35:55.605") which JS would otherwise parse as *local*
+// time; the live WS feed sends RFC3339 ("...T...Z"). Normalise both to UTC
+// so display and the live-window cutoff agree.
+function parseTs(s) {
+  if (!s) return NaN;
+  if (s.includes("T")) return new Date(s).getTime();   // already has zone (WS)
+  return new Date(s.replace(" ", "T") + "Z").getTime(); // naive → treat as UTC
+}
+
 const SEV_COLOR = {
   emerg:   "#ff2d55",
   alert:   "#ff3b30",
@@ -48,8 +58,9 @@ function SevBadge({ name }) {
 }
 
 function LogRow({ log, highlight, tightBottom }) {
-  const ts = new Date(log.received_at).toLocaleTimeString("sv-SE", { hour12: false }) +
-    "." + String(new Date(log.received_at).getMilliseconds()).padStart(3, "0");
+  const d = new Date(parseTs(log.received_at));
+  const ts = d.toLocaleTimeString("sv-SE", { hour12: false }) +
+    "." + String(d.getMilliseconds()).padStart(3, "0");
   const msg = highlight
     ? log.message.replace(new RegExp(`(${highlight})`, "gi"), "§§$1§§")
     : log.message;
@@ -349,13 +360,13 @@ export default function App() {
         const log = JSON.parse(e.data);
         setLogs((prev) => {
           const ca = clearedAtRef.current;
-          const caMs = ca ? new Date(ca).getTime() : null;
+          const caMs = ca ? parseTs(ca) : null;
           const cutoffMs = Date.now() - sinceToMs(filtersRef.current.since);
-          const logMs = new Date(log.received_at).getTime();
+          const logMs = parseTs(log.received_at);
           if (logMs < cutoffMs) return prev;
           if (caMs && logMs < caMs) return prev;
-          const combined = [...prev, log].filter(l => new Date(l.received_at).getTime() >= cutoffMs);
-          return combined.length > 500 ? combined.slice(-500) : combined;
+          const combined = [...prev, log].filter(l => parseTs(l.received_at) >= cutoffMs);
+          return combined.length > 2000 ? combined.slice(-2000) : combined;
         });
       };
 
@@ -440,8 +451,8 @@ export default function App() {
             </div>
           )}
           {logs.map((log, i) => {
-            const ms = new Date(log.received_at).getTime();
-            const nextMs = i < logs.length - 1 ? new Date(logs[i + 1].received_at).getTime() : null;
+            const ms = parseTs(log.received_at);
+            const nextMs = i < logs.length - 1 ? parseTs(logs[i + 1].received_at) : null;
             const tightBottom = nextMs !== null && logs[i + 1].hostname === log.hostname && nextMs - ms < 100;
             return (
               <LogRow key={i} log={log} highlight={filters.message_contains} tightBottom={tightBottom} />
