@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { api, buildLogsSQL } from "./api";
 
 function filtersFromURL() {
@@ -17,6 +17,16 @@ function sinceToMs(since) {
   const m = (since || "1h").match(/^(\d+)([mhd])$/);
   if (!m) return 3_600_000;
   return parseInt(m[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]];
+}
+
+// Parse a log timestamp to epoch ms. ClickHouse returns naive UTC strings
+// ("2026-06-18 12:35:55.605") which JS would otherwise parse as *local*
+// time; the live WS feed sends RFC3339 ("...T...Z"). Normalise both to UTC
+// so display and the live-window cutoff agree.
+function parseTs(s) {
+  if (!s) return NaN;
+  if (s.includes("T")) return new Date(s).getTime();   // already has zone (WS)
+  return new Date(s.replace(" ", "T") + "Z").getTime(); // naive → treat as UTC
 }
 
 const SEV_COLOR = {
@@ -48,8 +58,9 @@ function SevBadge({ name }) {
 }
 
 function LogRow({ log, highlight, tightBottom }) {
-  const ts = new Date(log.received_at).toLocaleTimeString("sv-SE", { hour12: false }) +
-    "." + String(new Date(log.received_at).getMilliseconds()).padStart(3, "0");
+  const d = new Date(parseTs(log.received_at));
+  const ts = d.toLocaleTimeString("sv-SE", { hour12: false }) +
+    "." + String(d.getMilliseconds()).padStart(3, "0");
   const msg = highlight
     ? log.message.replace(new RegExp(`(${highlight})`, "gi"), "§§$1§§")
     : log.message;
@@ -65,13 +76,11 @@ function LogRow({ log, highlight, tightBottom }) {
     }}>
       <span style={{ color: "#48484a", flexShrink: 0, fontSize: 11 }}>{ts}</span>
       <SevBadge name={log.severity_name} />
-      <span style={{ color: "#8e8e93", flexShrink: 0, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+      <span style={{ color: "#8e8e93", flexShrink: 0, width: "14ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         title={log.hostname}>{log.hostname}</span>
-      {log.source_ip && log.source_ip !== log.hostname && (
-        <span style={{ color: "#3a3a3c", flexShrink: 0, maxWidth: 95, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11 }}
-          title={log.source_ip}>{log.source_ip}</span>
-      )}
-      <span style={{ color: "#5e5ce6", flexShrink: 0, maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+      <span style={{ color: "#3a3a3c", flexShrink: 0, width: "16ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11 }}
+        title={log.source_ip}>{log.source_ip && log.source_ip !== log.hostname ? log.source_ip : ""}</span>
+      <span style={{ color: "#5e5ce6", flexShrink: 0, width: "32ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         title={log.app_name}>{log.app_name}</span>
       <span style={{ color: "#ebebf5cc", flex: 1, wordBreak: "break-all" }}>
         {highlight ? msg.split("§§").map((part, i) =>
@@ -287,8 +296,10 @@ export default function App() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [clearedAt, setClearedAt] = useState(null);
   const [showSql, setShowSql] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   const [sql, setSql] = useState(() => buildLogsSQL({ since: "1h" }));
   const bottomRef = useRef(null);
+  const atBottomRef = useRef(true);
   const clearedAtRef = useRef(null);
   const filtersRef = useRef(filters);
   useEffect(() => { clearedAtRef.current = clearedAt; }, [clearedAt]);
@@ -316,6 +327,11 @@ export default function App() {
         api.getHosts({ ...filters, source_ip: undefined, from: clearedAt }),
         api.getStats(filters.since || "1h"),
       ]);
+      setTruncated(logData.length >= 2000);
+      // A fresh query (mount, filter/device/window change) shows newest at
+      // the bottom and follows the tail until the user scrolls up.
+      atBottomRef.current = true;
+      setAutoScroll(true);
       setLogs(logData.reverse());
       setHosts(hostData);
       setStats(statsData);
@@ -351,13 +367,19 @@ export default function App() {
         const log = JSON.parse(e.data);
         setLogs((prev) => {
           const ca = clearedAtRef.current;
-          const caMs = ca ? new Date(ca).getTime() : null;
+          const caMs = ca ? parseTs(ca) : null;
           const cutoffMs = Date.now() - sinceToMs(filtersRef.current.since);
-          const logMs = new Date(log.received_at).getTime();
+          const logMs = parseTs(log.received_at);
           if (logMs < cutoffMs) return prev;
           if (caMs && logMs < caMs) return prev;
-          const combined = [...prev, log].filter(l => new Date(l.received_at).getTime() >= cutoffMs);
-          return combined.length > 500 ? combined.slice(-500) : combined;
+          const combined = [...prev, log];
+          // While the user has scrolled up to read history, append only;
+          // don't prune from the front (window age-out or the 2000 cap).
+          // Removing rows above the viewport shrinks the content and yanks
+          // the view back to the bottom. Resume pruning at the tail.
+          if (!atBottomRef.current) return combined;
+          const trimmed = combined.filter(l => parseTs(l.received_at) >= cutoffMs);
+          return trimmed.length > 2000 ? trimmed.slice(-2000) : trimmed;
         });
       };
 
@@ -373,11 +395,16 @@ export default function App() {
     };
   }, [liveMode, filters]);
 
-  useEffect(() => {
-    if (autoScroll && bottomRef.current) {
+  // Only follow new output when the user is parked at the bottom. Read the
+  // live position from a ref (kept in sync by onScroll) rather than the
+  // autoScroll state: the programmatic scroll below itself fires onScroll,
+  // and reading stale state here would re-pin the view and fight a user who
+  // is scrolling up through a busy live feed.
+  useLayoutEffect(() => {
+    if (atBottomRef.current && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: "instant" });
     }
-  }, [logs, autoScroll]);
+  }, [logs]);
 
   const clearLogs = useCallback(() => {
     setLogs([]);
@@ -404,6 +431,12 @@ export default function App() {
         <span style={{ marginLeft: 8, fontSize: 11, color: "#48484a", fontFamily: "monospace" }}>
           {logs.length} rows
         </span>
+        {truncated && !liveMode && (
+          <span style={{ marginLeft: 8, fontSize: 11, color: "#ff9500", fontFamily: "monospace" }}
+            title="More rows match this window than are shown; only the newest 2000 were loaded.">
+            newest 2000 (capped) — narrow the window or filter
+          </span>
+        )}
       </div>
 
       <StatsBar stats={stats} />
@@ -433,7 +466,9 @@ export default function App() {
           style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}
           onScroll={(e) => {
             const el = e.currentTarget;
-            setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            atBottomRef.current = atBottom;
+            setAutoScroll(atBottom);
           }}
         >
           {logs.length === 0 && !loading && (
@@ -442,8 +477,8 @@ export default function App() {
             </div>
           )}
           {logs.map((log, i) => {
-            const ms = new Date(log.received_at).getTime();
-            const nextMs = i < logs.length - 1 ? new Date(logs[i + 1].received_at).getTime() : null;
+            const ms = parseTs(log.received_at);
+            const nextMs = i < logs.length - 1 ? parseTs(logs[i + 1].received_at) : null;
             const tightBottom = nextMs !== null && logs[i + 1].hostname === log.hostname && nextMs - ms < 100;
             return (
               <LogRow key={i} log={log} highlight={filters.message_contains} tightBottom={tightBottom} />
@@ -456,7 +491,7 @@ export default function App() {
       {/* Auto-scroll indicator */}
       {!autoScroll && (
         <button
-          onClick={() => { setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "instant" }); }}
+          onClick={() => { atBottomRef.current = true; setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "instant" }); }}
           style={{ ...btnStyle, position: "fixed", bottom: 16, right: 16, background: "#1c1c1e", border: "1px solid #2c2c2e" }}
         >
           ↓ scroll to bottom

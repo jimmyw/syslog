@@ -24,7 +24,7 @@ function relativeToSQL(rel) {
   return `now() - INTERVAL ${n} ${map[unit]}`;
 }
 
-export function buildLogsSQL({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, limit = 200 } = {}) {
+export function buildLogsSQL({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, limit = 2000 } = {}) {
   const sinceExpr = from
     ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
     : (relativeToSQL(since) || `'${since}'`);

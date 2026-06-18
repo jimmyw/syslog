@@ -7,11 +7,18 @@ Usage:
   python stream_host.py myserver --since 6h --tail 50
   python stream_host.py --url https://syslog.wennlund.nu/
   python stream_host.py --logout            # clear stored session
+
+Export a time window to a local file (gzip-compressed transfer):
+  python stream_host.py myserver --since 6h --export logs.txt
+  python stream_host.py myserver --since 2d --until 1d --export win.jsonl --format jsonl
+  python stream_host.py myserver --since 24h --export logs.jsonl.gz --format jsonl
 """
 
 import argparse
 import base64
+import gzip
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -180,6 +187,82 @@ def ch_query(base_url, sql, opener):
     return [json.loads(line) for line in text.strip().split("\n") if line]
 
 
+def host_where_sql(hosts):
+    """Build a WHERE clause matching any of `hosts` (ORed), or '' for no filter."""
+    if not hosts:
+        return ""
+    clauses = " OR ".join(
+        "(lower(hostname) LIKE lower('{h}%') OR source_ip = '{h}' "
+        "OR lower(app_name) = lower('{h}') OR lower(app_name) LIKE lower('{h} %'))".format(
+            h=h.replace("'", "''"))
+        for h in hosts
+    )
+    return f"({clauses})"
+
+
+def ch_query_stream(base_url, sql, opener, compress=True):
+    """Yield result lines from /ch one at a time, with optional gzip transfer.
+
+    ClickHouse gzips the response body when enable_http_compression=1 and the
+    request advertises Accept-Encoding: gzip — this slashes transfer size for
+    large exports. We stream + decompress incrementally so memory stays flat
+    regardless of result size.
+    """
+    params = {
+        "query": sql,
+        "default_format": "JSONEachRow",
+        "database": "syslog",
+    }
+    if compress:
+        params["enable_http_compression"] = "1"
+    url = f"{base_url}/ch/?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url)
+    if compress:
+        req.add_header("Accept-Encoding", "gzip")
+    resp = opener.open(req, timeout=300)
+    stream = resp
+    if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+        stream = gzip.GzipFile(fileobj=resp)
+    reader = io.TextIOWrapper(stream, encoding="utf-8", errors="replace")
+    for line in reader:
+        line = line.rstrip("\n")
+        if line:
+            yield line
+
+
+def export_logs(base_url, opener, hosts, since, until, fmt, limit, out_path, compress):
+    """Stream a host/time-window query to a local file. Returns (rows, bytes, secs)."""
+    sql = (
+        "SELECT received_at, hostname, app_name, proc_id, severity_name, source_ip, message "
+        "FROM syslog.logs "
+        f"WHERE received_at >= {relative_to_sql(since)}"
+    )
+    if until:
+        sql += f" AND received_at <= {relative_to_sql(until)}"
+    host_where = host_where_sql(hosts)
+    if host_where:
+        sql += f" AND {host_where}"
+    sql += " ORDER BY received_at ASC"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+
+    open_out = gzip.open if out_path.endswith(".gz") else open
+    rows = 0
+    t0 = time.time()
+    with open_out(out_path, "wt", encoding="utf-8") as fh:
+        for line in ch_query_stream(base_url, sql, opener, compress=compress):
+            if fmt == "jsonl":
+                fh.write(line + "\n")
+            else:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                fh.write(format_log(row, color=False) + "\n")
+            rows += 1
+    return rows, os.path.getsize(out_path), time.time() - t0
+
+
 
 # ── WebSocket client (stdlib only) ───────────────────────────────────────────
 
@@ -340,7 +423,18 @@ def main():
     parser.add_argument("--tail", type=int, default=20, metavar="N",
                         help="Historical lines before live streaming (default: 20, 0 to skip)")
     parser.add_argument("--since", default="1h",
-                        help="Time window for historical tail: 5m, 15m, 1h, 6h, 24h, 7d (default: 1h)")
+                        help="Time window start: 5m, 15m, 1h, 6h, 24h, 7d or ISO8601 (default: 1h)")
+    parser.add_argument("--until", default=None,
+                        help="Time window end for --export: relative (30m, 2h) or ISO8601 (default: now)")
+    parser.add_argument("--export", "-o", dest="export", metavar="PATH", default=None,
+                        help="Export the matching window to PATH instead of live streaming. "
+                             "Transfer is gzip-compressed; use a .gz path to keep the file compressed too.")
+    parser.add_argument("--format", dest="fmt", choices=("text", "jsonl"), default="text",
+                        help="Export format: text (human-readable, default) or jsonl (raw JSON rows)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max rows to export (default: unlimited)")
+    parser.add_argument("--no-compress", action="store_true",
+                        help="Disable gzip HTTP compression during --export")
     parser.add_argument("--no-color", action="store_true",
                         help="Disable ANSI color output")
     parser.add_argument("--logout", action="store_true",
@@ -359,6 +453,25 @@ def main():
     token  = ensure_auth(base_url)
     opener = _opener(token)
 
+    # --- Bulk export to file (no live stream) ---
+    if args.export:
+        target = " or ".join(hosts) if hosts else "all hosts"
+        window = f"since {args.since}" + (f" until {args.until}" if args.until else "")
+        print(f"Exporting {target} ({window}) → {args.export} …", file=sys.stderr, flush=True)
+        try:
+            rows, size, dt = export_logs(
+                base_url, opener, hosts, args.since, args.until,
+                args.fmt, args.limit, args.export, not args.no_compress,
+            )
+        except Exception as e:
+            print(f"Export failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        mb = size / (1024 * 1024)
+        rate = (mb / dt) if dt > 0 else 0
+        print(f"Wrote {rows} rows, {mb:.1f} MB in {dt:.1f}s ({rate:.1f} MB/s on disk)",
+              file=sys.stderr)
+        return
+
     # --- Historical tail ---
     if args.tail > 0:
         since_expr = relative_to_sql(args.since)
@@ -367,12 +480,9 @@ def main():
             "FROM syslog.logs "
             f"WHERE received_at >= {since_expr}"
         )
-        if hosts:
-            clauses = " OR ".join(
-                "(lower(hostname) LIKE lower('{h}%') OR source_ip = '{h}' OR lower(app_name) = lower('{h}') OR lower(app_name) LIKE lower('{h} %'))".format(h=h.replace("'", "''"))
-                for h in hosts
-            )
-            sql += f" AND ({clauses})"
+        host_where = host_where_sql(hosts)
+        if host_where:
+            sql += f" AND {host_where}"
         sql += f" ORDER BY received_at DESC LIMIT {args.tail}"
 
         try:
