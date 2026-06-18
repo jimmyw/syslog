@@ -65,13 +65,11 @@ function LogRow({ log, highlight, tightBottom }) {
     }}>
       <span style={{ color: "#48484a", flexShrink: 0, fontSize: 11 }}>{ts}</span>
       <SevBadge name={log.severity_name} />
-      <span style={{ color: "#8e8e93", flexShrink: 0, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+      <span style={{ color: "#8e8e93", flexShrink: 0, width: "14ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         title={log.hostname}>{log.hostname}</span>
-      {log.source_ip && log.source_ip !== log.hostname && (
-        <span style={{ color: "#3a3a3c", flexShrink: 0, maxWidth: 95, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11 }}
-          title={log.source_ip}>{log.source_ip}</span>
-      )}
-      <span style={{ color: "#5e5ce6", flexShrink: 0, maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+      <span style={{ color: "#3a3a3c", flexShrink: 0, width: "16ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11 }}
+        title={log.source_ip}>{log.source_ip && log.source_ip !== log.hostname ? log.source_ip : ""}</span>
+      <span style={{ color: "#5e5ce6", flexShrink: 0, width: "32ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         title={log.app_name}>{log.app_name}</span>
       <span style={{ color: "#ebebf5cc", flex: 1, wordBreak: "break-all" }}>
         {highlight ? msg.split("§§").map((part, i) =>
