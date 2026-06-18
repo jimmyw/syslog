@@ -296,6 +296,7 @@ export default function App() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [clearedAt, setClearedAt] = useState(null);
   const [showSql, setShowSql] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   const [sql, setSql] = useState(() => buildLogsSQL({ since: "1h" }));
   const bottomRef = useRef(null);
   const clearedAtRef = useRef(null);
@@ -325,6 +326,7 @@ export default function App() {
         api.getHosts({ ...filters, source_ip: undefined, from: clearedAt }),
         api.getStats(filters.since || "1h"),
       ]);
+      setTruncated(logData.length >= 2000);
       setLogs(logData.reverse());
       setHosts(hostData);
       setStats(statsData);
@@ -413,6 +415,12 @@ export default function App() {
         <span style={{ marginLeft: 8, fontSize: 11, color: "#48484a", fontFamily: "monospace" }}>
           {logs.length} rows
         </span>
+        {truncated && !liveMode && (
+          <span style={{ marginLeft: 8, fontSize: 11, color: "#ff9500", fontFamily: "monospace" }}
+            title="More rows match this window than are shown; only the newest 2000 were loaded.">
+            newest 2000 (capped) — narrow the window or filter
+          </span>
+        )}
       </div>
 
       <StatsBar stats={stats} />
