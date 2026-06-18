@@ -19,6 +19,11 @@ function sinceToMs(since) {
   return parseInt(m[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]];
 }
 
+// Max rows the live view keeps in memory. Matches the server fetch cap
+// (buildLogsSQL clamps LIMIT to 2000) and bounds both the rendered list and
+// the pending buffer that accumulates while the user is scrolled up.
+const MAX_ROWS = 2000;
+
 // Parse a log timestamp to epoch ms. ClickHouse returns naive UTC strings
 // ("2026-06-18 12:35:55.605") which JS would otherwise parse as *local*
 // time; the live WS feed sends RFC3339 ("...T...Z"). Normalise both to UTC
@@ -298,8 +303,10 @@ export default function App() {
   const [showSql, setShowSql] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [sql, setSql] = useState(() => buildLogsSQL({ since: "1h" }));
+  const [pendingCount, setPendingCount] = useState(0);
   const bottomRef = useRef(null);
   const atBottomRef = useRef(true);
+  const pendingRef = useRef([]);
   const clearedAtRef = useRef(null);
   const filtersRef = useRef(filters);
   useEffect(() => { clearedAtRef.current = clearedAt; }, [clearedAt]);
@@ -327,9 +334,12 @@ export default function App() {
         api.getHosts({ ...filters, source_ip: undefined, from: clearedAt }),
         api.getStats(filters.since || "1h"),
       ]);
-      setTruncated(logData.length >= 2000);
+      setTruncated(logData.length >= MAX_ROWS);
       // A fresh query (mount, filter/device/window change) shows newest at
-      // the bottom and follows the tail until the user scrolls up.
+      // the bottom and follows the tail until the user scrolls up. Drop any
+      // lines buffered against the previous query.
+      pendingRef.current = [];
+      setPendingCount(0);
       atBottomRef.current = true;
       setAutoScroll(true);
       setLogs(logData.reverse());
@@ -365,21 +375,30 @@ export default function App() {
 
       ws.onmessage = (e) => {
         const log = JSON.parse(e.data);
+        const ca = clearedAtRef.current;
+        const caMs = ca ? parseTs(ca) : null;
+        const cutoffMs = Date.now() - sinceToMs(filtersRef.current.since);
+        const logMs = parseTs(log.received_at);
+        if (logMs < cutoffMs) return;
+        if (caMs && logMs < caMs) return;
+
+        // While the user is scrolled up reading history, leave the rendered
+        // list untouched (any change above the viewport would shift it and
+        // fight their scroll) and stash incoming lines in a buffer. Keep only
+        // the newest MAX_ROWS so a busy feed can't grow memory without bound.
+        // The buffer is flushed when they return to the bottom.
+        if (!atBottomRef.current) {
+          const buf = pendingRef.current;
+          buf.push(log);
+          if (buf.length > MAX_ROWS) buf.splice(0, buf.length - MAX_ROWS);
+          setPendingCount(buf.length);
+          return;
+        }
+
         setLogs((prev) => {
-          const ca = clearedAtRef.current;
-          const caMs = ca ? parseTs(ca) : null;
-          const cutoffMs = Date.now() - sinceToMs(filtersRef.current.since);
-          const logMs = parseTs(log.received_at);
-          if (logMs < cutoffMs) return prev;
-          if (caMs && logMs < caMs) return prev;
           const combined = [...prev, log];
-          // While the user has scrolled up to read history, append only;
-          // don't prune from the front (window age-out or the 2000 cap).
-          // Removing rows above the viewport shrinks the content and yanks
-          // the view back to the bottom. Resume pruning at the tail.
-          if (!atBottomRef.current) return combined;
           const trimmed = combined.filter(l => parseTs(l.received_at) >= cutoffMs);
-          return trimmed.length > 2000 ? trimmed.slice(-2000) : trimmed;
+          return trimmed.length > MAX_ROWS ? trimmed.slice(-MAX_ROWS) : trimmed;
         });
       };
 
@@ -405,6 +424,30 @@ export default function App() {
       bottomRef.current.scrollIntoView({ behavior: "instant" });
     }
   }, [logs]);
+
+  // Return to the tail: merge any buffered lines back in (applying the same
+  // window age-out and cap as the live path), resume following, and pin to
+  // the bottom. Used by the scroll-to-bottom button and when the user scrolls
+  // down to the end manually.
+  const flushPending = useCallback(() => {
+    const buf = pendingRef.current;
+    pendingRef.current = [];
+    setPendingCount(0);
+    atBottomRef.current = true;
+    setAutoScroll(true);
+    if (buf.length) {
+      const cutoffMs = Date.now() - sinceToMs(filtersRef.current.since);
+      setLogs((prev) => {
+        const combined = [...prev, ...buf];
+        const trimmed = combined.filter(l => parseTs(l.received_at) >= cutoffMs);
+        return trimmed.length > MAX_ROWS ? trimmed.slice(-MAX_ROWS) : trimmed;
+      });
+    } else {
+      // No buffered lines means setLogs won't run, so the layout effect won't
+      // fire — scroll to the bottom explicitly.
+      bottomRef.current?.scrollIntoView({ behavior: "instant" });
+    }
+  }, []);
 
   const clearLogs = useCallback(() => {
     setLogs([]);
@@ -469,6 +512,9 @@ export default function App() {
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
             atBottomRef.current = atBottom;
             setAutoScroll(atBottom);
+            // Reaching the tail resumes following; drain anything buffered
+            // while scrolled up.
+            if (atBottom && pendingRef.current.length) flushPending();
           }}
         >
           {logs.length === 0 && !loading && (
@@ -491,10 +537,17 @@ export default function App() {
       {/* Auto-scroll indicator */}
       {!autoScroll && (
         <button
-          onClick={() => { atBottomRef.current = true; setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "instant" }); }}
-          style={{ ...btnStyle, position: "fixed", bottom: 16, right: 16, background: "#1c1c1e", border: "1px solid #2c2c2e" }}
+          onClick={flushPending}
+          style={{
+            ...btnStyle, position: "fixed", bottom: 16, right: 16,
+            background: pendingCount > 0 ? "#0d2b0d" : "#1c1c1e",
+            color: pendingCount > 0 ? "#30d158" : "#ebebf5",
+            border: `1px solid ${pendingCount > 0 ? "#1a3d1a" : "#2c2c2e"}`,
+          }}
         >
-          ↓ scroll to bottom
+          ↓ {pendingCount > 0
+            ? `${pendingCount >= MAX_ROWS ? MAX_ROWS.toLocaleString() + "+" : pendingCount.toLocaleString()} new line${pendingCount === 1 ? "" : "s"}`
+            : "scroll to bottom"}
         </button>
       )}
     </div>
