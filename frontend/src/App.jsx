@@ -328,6 +328,10 @@ export default function App() {
         api.getStats(filters.since || "1h"),
       ]);
       setTruncated(logData.length >= 2000);
+      // A fresh query (mount, filter/device/window change) shows newest at
+      // the bottom and follows the tail until the user scrolls up.
+      atBottomRef.current = true;
+      setAutoScroll(true);
       setLogs(logData.reverse());
       setHosts(hostData);
       setStats(statsData);
@@ -368,8 +372,14 @@ export default function App() {
           const logMs = parseTs(log.received_at);
           if (logMs < cutoffMs) return prev;
           if (caMs && logMs < caMs) return prev;
-          const combined = [...prev, log].filter(l => parseTs(l.received_at) >= cutoffMs);
-          return combined.length > 2000 ? combined.slice(-2000) : combined;
+          const combined = [...prev, log];
+          // While the user has scrolled up to read history, append only;
+          // don't prune from the front (window age-out or the 2000 cap).
+          // Removing rows above the viewport shrinks the content and yanks
+          // the view back to the bottom. Resume pruning at the tail.
+          if (!atBottomRef.current) return combined;
+          const trimmed = combined.filter(l => parseTs(l.received_at) >= cutoffMs);
+          return trimmed.length > 2000 ? trimmed.slice(-2000) : trimmed;
         });
       };
 
