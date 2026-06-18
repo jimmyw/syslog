@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { api, buildLogsSQL } from "./api";
 
 function filtersFromURL() {
@@ -299,6 +299,7 @@ export default function App() {
   const [truncated, setTruncated] = useState(false);
   const [sql, setSql] = useState(() => buildLogsSQL({ since: "1h" }));
   const bottomRef = useRef(null);
+  const atBottomRef = useRef(true);
   const clearedAtRef = useRef(null);
   const filtersRef = useRef(filters);
   useEffect(() => { clearedAtRef.current = clearedAt; }, [clearedAt]);
@@ -384,11 +385,16 @@ export default function App() {
     };
   }, [liveMode, filters]);
 
-  useEffect(() => {
-    if (autoScroll && bottomRef.current) {
+  // Only follow new output when the user is parked at the bottom. Read the
+  // live position from a ref (kept in sync by onScroll) rather than the
+  // autoScroll state: the programmatic scroll below itself fires onScroll,
+  // and reading stale state here would re-pin the view and fight a user who
+  // is scrolling up through a busy live feed.
+  useLayoutEffect(() => {
+    if (atBottomRef.current && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: "instant" });
     }
-  }, [logs, autoScroll]);
+  }, [logs]);
 
   const clearLogs = useCallback(() => {
     setLogs([]);
@@ -450,7 +456,9 @@ export default function App() {
           style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}
           onScroll={(e) => {
             const el = e.currentTarget;
-            setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            atBottomRef.current = atBottom;
+            setAutoScroll(atBottom);
           }}
         >
           {logs.length === 0 && !loading && (
@@ -473,7 +481,7 @@ export default function App() {
       {/* Auto-scroll indicator */}
       {!autoScroll && (
         <button
-          onClick={() => { setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "instant" }); }}
+          onClick={() => { atBottomRef.current = true; setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "instant" }); }}
           style={{ ...btnStyle, position: "fixed", bottom: 16, right: 16, background: "#1c1c1e", border: "1px solid #2c2c2e" }}
         >
           ↓ scroll to bottom
