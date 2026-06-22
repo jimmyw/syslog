@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stream-host"
+version = "0.1.0"
+description = "Stream logs from syslog server"
+requires-python = ">=3.11"
+dependencies = [
+]
+
+[project.scripts]
+stream_host = "stream_host:main"
+
+[tool.hatch.build.targets.wheel]
+include = ["stream_host.py"]
