@@ -44,12 +44,24 @@ SEVERITY_COLORS = {
     "error":   "\033[31m",
     "warning": "\033[33m",
     "notice":  "\033[36m",
-    "info":    "\033[0m",
+    "info":    "\033[1m",
     "debug":   "\033[2m",
+}
+SEVERITY_SHORT = {
+    "emerg":   "emrg",
+    "alert":   "alrt",
+    "crit":    "crit",
+    "err":     "erro",
+    "error":   "erro",
+    "warning": "warn",
+    "notice":  "noti",
+    "info":    "info",
+    "debug":   "debu",
 }
 RESET = "\033[0m"
 DIM   = "\033[2m"
 BOLD  = "\033[1m"
+CYAN  = "\033[36m"
 
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -380,6 +392,11 @@ def ws_stream(base_url, token, hosts, color):
 
 # ── Formatting ────────────────────────────────────────────────────────────────
 
+HOST_W = 26  # "B8T5-B833 (176.10.148.72)" = 25
+APP_W  = 26  # "ota_coordinator[ota_task]" = 25
+SEV_W  = 6   # "[xxxx]" = 6, all shorts are exactly 4 chars
+
+
 def format_log(log, color=True):
     ts       = log.get("received_at", "")[:19]
     src      = log.get("source_ip", "")
@@ -391,11 +408,25 @@ def format_log(log, color=True):
     sev      = log.get("severity_name", "info").lower()
     msg      = log.get("message", "")
     proc     = f"[{pid}]" if pid and pid not in ("-", "") else ""
+    sev_str  = f"[{SEVERITY_SHORT.get(sev, sev[:4])}]"
 
     if color:
-        c = SEVERITY_COLORS.get(sev, "")
-        return f"{DIM}{ts}{RESET}  {BOLD}{hostname}{RESET}{DIM}{ip_tag}{RESET}  {app}{proc}  {c}[{sev}]  {msg}{RESET}"
-    return f"{ts}  {hostname}{ip_tag}  {app}{proc}  [{sev}]  {msg}"
+        c    = SEVERITY_COLORS.get(sev, "")
+        msg_c = DIM if sev == "debug" else (BOLD if sev == "info" else "")
+        host_pad = " " * max(0, HOST_W - len(hostname) - len(ip_tag))
+        app_pad  = " " * max(0, APP_W  - len(app) - len(proc))
+        sev_pad  = " " * max(0, SEV_W  - len(sev_str))
+        return (
+            f"{DIM}{ts}{RESET}  "
+            f"{BOLD}{hostname}{RESET}{DIM}{ip_tag}{RESET}{host_pad}  "
+            f"{CYAN}{app}{proc}{RESET}{app_pad}  "
+            f"{c}{sev_str}{RESET}{sev_pad} "
+            f"{msg_c}{msg}{RESET}"
+        )
+    host_col = (hostname + ip_tag).ljust(HOST_W)
+    app_col  = (app + proc).ljust(APP_W)
+    sev_col  = sev_str.ljust(SEV_W)
+    return f"{ts}  {host_col}  {app_col}  {sev_col} {msg}"
 
 
 def host_matches(log, host):
