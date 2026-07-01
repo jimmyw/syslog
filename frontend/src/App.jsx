@@ -297,6 +297,8 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [filters, setFilters] = useState(filtersFromURL);
   const [loading, setLoading] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [liveMode, setLiveMode] = useState(() => new URLSearchParams(location.search).get("live") === "1");
   const [autoScroll, setAutoScroll] = useState(true);
   const [clearedAt, setClearedAt] = useState(null);
@@ -305,6 +307,8 @@ export default function App() {
   const [sql, setSql] = useState(() => buildLogsSQL({ since: "1h" }));
   const [pendingCount, setPendingCount] = useState(0);
   const bottomRef = useRef(null);
+  const scrollRef = useRef(null);
+  const prependScrollHeightRef = useRef(null);
   const atBottomRef = useRef(true);
   const pendingRef = useRef([]);
   const clearedAtRef = useRef(null);
@@ -335,6 +339,7 @@ export default function App() {
         api.getStats(filters.since || "1h"),
       ]);
       setTruncated(logData.length >= MAX_ROWS);
+      setHasMore(logData.length >= MAX_ROWS);
       // A fresh query (mount, filter/device/window change) shows newest at
       // the bottom and follows the tail until the user scrolls up. Drop any
       // lines buffered against the previous query.
@@ -353,6 +358,23 @@ export default function App() {
   }, [filters, clearedAt]);
 
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
+
+  const loadOlderLogs = useCallback(async () => {
+    if (loadingOlder || loading || !hasMore || logs.length === 0) return;
+    const oldest = logs[0].received_at;
+    setLoadingOlder(true);
+    try {
+      const older = await api.getLogs({ ...filters, from: clearedAt, before: oldest });
+      if (older.length === 0) { setHasMore(false); return; }
+      prependScrollHeightRef.current = scrollRef.current?.scrollHeight ?? 0;
+      setHasMore(older.length >= MAX_ROWS);
+      setLogs(prev => [...older.reverse(), ...prev]);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [loadingOlder, loading, hasMore, logs, filters, clearedAt]);
 
   useEffect(() => {
     if (!liveMode) return;
@@ -420,6 +442,11 @@ export default function App() {
   // and reading stale state here would re-pin the view and fight a user who
   // is scrolling up through a busy live feed.
   useLayoutEffect(() => {
+    if (prependScrollHeightRef.current !== null && scrollRef.current) {
+      scrollRef.current.scrollTop += scrollRef.current.scrollHeight - prependScrollHeightRef.current;
+      prependScrollHeightRef.current = null;
+      return;
+    }
     if (atBottomRef.current && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: "instant" });
     }
@@ -475,9 +502,8 @@ export default function App() {
           {logs.length} rows
         </span>
         {truncated && !liveMode && (
-          <span style={{ marginLeft: 8, fontSize: 11, color: "#ff9500", fontFamily: "monospace" }}
-            title="More rows match this window than are shown; only the newest 2000 were loaded.">
-            newest 2000 (capped) — narrow the window or filter
+          <span style={{ marginLeft: 8, fontSize: 11, color: "#636366", fontFamily: "monospace" }}>
+            newest 2000 — scroll up to load older
           </span>
         )}
       </div>
@@ -506,17 +532,27 @@ export default function App() {
         />
 
         <div
+          ref={scrollRef}
           style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}
           onScroll={(e) => {
             const el = e.currentTarget;
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
             atBottomRef.current = atBottom;
             setAutoScroll(atBottom);
-            // Reaching the tail resumes following; drain anything buffered
-            // while scrolled up.
             if (atBottom && pendingRef.current.length) flushPending();
+            if (el.scrollTop < 200 && hasMore && !loadingOlder && !loading) loadOlderLogs();
           }}
         >
+          {loadingOlder && (
+            <div style={{ color: "#636366", fontFamily: "monospace", fontSize: 11, padding: "8px 12px", textAlign: "center" }}>
+              ↑ loading older…
+            </div>
+          )}
+          {!hasMore && !loadingOlder && logs.length > 0 && (
+            <div style={{ color: "#3a3a3c", fontFamily: "monospace", fontSize: 10, padding: "6px 12px", textAlign: "center" }}>
+              ─── beginning of results ───
+            </div>
+          )}
           {logs.length === 0 && !loading && (
             <div style={{ color: "#636366", fontFamily: "monospace", fontSize: 13, padding: 24 }}>
               No logs match your filters.

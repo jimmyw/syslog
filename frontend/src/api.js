@@ -24,12 +24,13 @@ function relativeToSQL(rel) {
   return `now() - INTERVAL ${n} ${map[unit]}`;
 }
 
-export function buildLogsSQL({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, limit = 2000 } = {}) {
+export function buildLogsSQL({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, before, limit = 2000 } = {}) {
   const sinceExpr = from
     ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
     : (relativeToSQL(since) || `'${since}'`);
   const where = [`received_at >= ${sinceExpr}`];
   if (until) where.push(`received_at <= '${until}'`);
+  if (before) where.push(`received_at < '${before.replace('T', ' ').replace(/\.\d+Z$/, '')}'`);
   if (source_ip) where.push(`source_ip = '${source_ip.replace(/'/g, "''")}'`);
   if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
   if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);
