@@ -50,9 +50,9 @@ const SEV_ORDER = ["emerg","alert","crit","err","warning","notice","info","debug
 const SEV_MAX = { emerg:0, alert:1, crit:2, err:3, warning:4, notice:5, info:6, debug:7 };
 const SEV_ABBR = { emerg:"EMRG", alert:"ALRT", crit:"CRIT", err:"ERRO", warning:"WARN", notice:"NOTE", info:"INFO", debug:"DEBG" };
 
-function SevBadge({ name }) {
+function SevBadge({ name, onClick }) {
   return (
-    <span style={{
+    <span onClick={onClick} style={{
       fontSize: 10, fontWeight: 700,
       fontFamily: "monospace",
       display: "inline-block", width: "3.2em", textAlign: "center",
@@ -60,6 +60,7 @@ function SevBadge({ name }) {
       background: SEV_COLOR[name] || "#444",
       color: ["emerg","alert","crit","err"].includes(name) ? "#fff" : name === "warning" ? "#000" : "#fff",
       flexShrink: 0,
+      cursor: onClick ? "pointer" : "default",
     }}>{SEV_ABBR[name] || name.slice(0,4).toUpperCase()}</span>
   );
 }
@@ -71,7 +72,7 @@ function isSameDay(d) {
     d.getDate() === today.getDate();
 }
 
-function LogRow({ log, highlight, tightBottom }) {
+function LogRow({ log, highlight, tightBottom, onFilter }) {
   const d = new Date(parseTs(log.received_at));
   const timePart = d.toLocaleTimeString("sv-SE", { hour12: false }) +
     "." + String(d.getMilliseconds()).padStart(3, "0");
@@ -81,6 +82,7 @@ function LogRow({ log, highlight, tightBottom }) {
   const msg = highlight
     ? log.message.replace(new RegExp(`(${highlight})`, "gi"), "§§$1§§")
     : log.message;
+  const showIp = log.source_ip && log.source_ip !== log.hostname;
 
   return (
     <div style={{
@@ -92,13 +94,26 @@ function LogRow({ log, highlight, tightBottom }) {
       background: SEV_MAX[log.severity_name] <= 3 ? "rgba(255,60,0,0.04)" : "transparent",
     }}>
       <span style={{ color: "#48484a", flexShrink: 0, fontSize: 11 }}>{ts}</span>
-      <SevBadge name={log.severity_name} />
-      <span style={{ color: "#8e8e93", flexShrink: 0, width: "14ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-        title={log.hostname}>{log.hostname}</span>
-      <span style={{ color: "#3a3a3c", flexShrink: 0, width: "16ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11 }}
-        title={log.source_ip}>{log.source_ip && log.source_ip !== log.hostname ? log.source_ip : ""}</span>
-      <span style={{ color: "#5e5ce6", flexShrink: 0, width: "32ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-        title={log.app_name}>{log.app_name}</span>
+      <SevBadge name={log.severity_name}
+        onClick={() => onFilter({ severity_max: SEV_MAX[log.severity_name] })} />
+      <span
+        onClick={() => onFilter({ hostname: log.hostname })}
+        title={`filter: hostname = ${log.hostname}`}
+        style={{ color: "#8e8e93", flexShrink: 0, width: "14ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }}>
+        {log.hostname}
+      </span>
+      <span
+        onClick={() => showIp && onFilter({ source_ip: log.source_ip })}
+        title={showIp ? `filter: source_ip = ${log.source_ip}` : undefined}
+        style={{ color: "#3a3a3c", flexShrink: 0, width: "16ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, cursor: showIp ? "pointer" : "default" }}>
+        {showIp ? log.source_ip : ""}
+      </span>
+      <span
+        onClick={() => onFilter({ app_name: log.app_name })}
+        title={`filter: app_name = ${log.app_name}`}
+        style={{ color: "#5e5ce6", flexShrink: 0, width: "32ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }}>
+        {log.app_name}
+      </span>
       <span style={{ color: "#ebebf5cc", flex: 1, wordBreak: "break-all" }}>
         {highlight ? msg.split("§§").map((part, i) =>
           i % 2 === 1
@@ -352,6 +367,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [liveMode, setLiveMode] = useState(() => new URLSearchParams(location.search).get("live") === "1");
   const [autoScroll, setAutoScroll] = useState(true);
   const [clearedAt, setClearedAt] = useState(null);
@@ -385,36 +401,35 @@ export default function App() {
     history.replaceState(null, "", qs ? `?${qs}` : location.pathname);
   }, [filters, liveMode]);
 
-  const fetchLogs = useCallback(async () => {
+  const refresh = useCallback(() => setRefreshKey(k => k + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
     setLoading(true);
-    try {
-      const from = filters.fromTime || clearedAt;
-      const until = filters.untilTime;
-      const [logData, hostData, statsData] = await Promise.all([
-        api.getLogs({ ...filters, from, until }),
-        api.getHosts({ ...filters, source_ip: undefined, from, until }),
-        api.getStats(filters.since || "1h"),
-      ]);
+    const from = filters.fromTime || clearedAt;
+    const until = filters.untilTime;
+    Promise.all([
+      api.getLogs({ ...filters, from, until }),
+      api.getHosts({ ...filters, source_ip: undefined, from, until }).catch(() => null),
+      api.getStats(filters.since || "1h").catch(() => null),
+    ]).then(([logData, hostData, statsData]) => {
+      if (cancelled) return;
       setTruncated(logData.length >= MAX_ROWS);
       setHasMore(logData.length >= MAX_ROWS);
-      // A fresh query (mount, filter/device/window change) shows newest at
-      // the bottom and follows the tail until the user scrolls up. Drop any
-      // lines buffered against the previous query.
       pendingRef.current = [];
       setPendingCount(0);
       atBottomRef.current = true;
       setAutoScroll(true);
       setLogs(logData.reverse());
-      setHosts(hostData);
-      setStats(statsData);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  }, [filters, clearedAt]);
-
-  useEffect(() => { fetchLogs(); }, [fetchLogs]);
+      if (hostData) setHosts(hostData);
+      if (statsData) setStats(statsData);
+    }).catch(e => {
+      if (!cancelled) console.error(e);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [filters, clearedAt, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadOlderLogs = useCallback(async () => {
     if (loadingOlder || loading || !hasMore || logs.length === 0) return;
@@ -538,6 +553,16 @@ export default function App() {
     setClearedAt(new Date().toISOString());
   }, []);
 
+  const onFilterRow = useCallback((update) => {
+    setFilters(f => {
+      const next = { ...f };
+      for (const [k, v] of Object.entries(update)) {
+        next[k] = f[k] === v ? undefined : v;
+      }
+      return next;
+    });
+  }, []);
+
   const runSql = useCallback(async (rawSql) => {
     setLoading(true);
     try {
@@ -570,7 +595,7 @@ export default function App() {
         filters={filters}
         setFilters={setFilters}
         loading={loading}
-        onRefresh={fetchLogs}
+        onRefresh={refresh}
         onClear={clearLogs}
         onResetCleared={() => setClearedAt(null)}
         liveMode={liveMode}
@@ -620,7 +645,7 @@ export default function App() {
             const nextMs = i < logs.length - 1 ? parseTs(logs[i + 1].received_at) : null;
             const tightBottom = nextMs !== null && logs[i + 1].hostname === log.hostname && nextMs - ms < 100;
             return (
-              <LogRow key={i} log={log} highlight={filters.message_contains} tightBottom={tightBottom} />
+              <LogRow key={i} log={log} highlight={filters.message_contains} tightBottom={tightBottom} onFilter={onFilterRow} />
             );
           })}
           <div ref={bottomRef} />
