@@ -24,13 +24,31 @@ function relativeToSQL(rel) {
   return `now() - INTERVAL ${n} ${map[unit]}`;
 }
 
+function toChTs(v) {
+  // UTC ISO string ("...Z" or "+HH:MM" offset) — strip fractions/Z, keep as UTC
+  if (v.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(v)) {
+    return v.replace('T', ' ').replace(/\.\d+Z$/, '').replace(/Z$/, '');
+  }
+  // datetime-local string ("YYYY-MM-DDTHH:MM" — no timezone = local time)
+  // Convert from local to UTC for ClickHouse
+  if (v.includes('T')) {
+    const d = new Date(v); // spec: datetime string without TZ parsed as local
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+  }
+  // ClickHouse naive UTC string ("YYYY-MM-DD HH:MM:SS.mmm") — strip fractions only
+  let s = v.replace(/\.\d+$/, '');
+  if (s.length === 16) s += ':00';
+  return s;
+}
+
 export function buildLogsSQL({ hostname, source_ip, app_name, severity_max, message_contains, since = "1h", from, until, before, limit = 2000 } = {}) {
   const sinceExpr = from
-    ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
+    ? `'${toChTs(from)}'`
     : (relativeToSQL(since) || `'${since}'`);
   const where = [`received_at >= ${sinceExpr}`];
-  if (until) where.push(`received_at <= '${until}'`);
-  if (before) where.push(`received_at < '${before.replace('T', ' ').replace(/\.\d+Z$/, '')}'`);
+  if (until) where.push(`received_at <= '${toChTs(until)}'`);
+  if (before) where.push(`received_at < '${toChTs(before)}'`);
   if (source_ip) where.push(`source_ip = '${source_ip.replace(/'/g, "''")}'`);
   if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
   if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);
@@ -56,10 +74,10 @@ export const api = {
 
   async getHosts({ hostname, app_name, severity_max, message_contains, since = "1h", from, until } = {}) {
     const sinceExpr = from
-      ? `'${from.replace('T', ' ').replace(/\.\d+Z$/, '')}'`
+      ? `'${toChTs(from)}'`
       : (relativeToSQL(since) || `'${since}'`);
     const where = [`received_at >= ${sinceExpr}`];
-    if (until) where.push(`received_at <= '${until}'`);
+    if (until) where.push(`received_at <= '${toChTs(until)}'`);
     if (hostname) where.push(`hostname LIKE '${hostname.replace(/'/g, "''")}'`);
     if (app_name) where.push(`app_name = '${app_name.replace(/'/g, "''")}'`);
     if (severity_max !== undefined && severity_max !== null) where.push(`severity <= ${severity_max}`);

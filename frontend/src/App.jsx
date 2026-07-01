@@ -8,6 +8,8 @@ function filtersFromURL() {
   if (p.get("source_ip"))         f.source_ip         = p.get("source_ip");
   if (p.get("app_name"))          f.app_name          = p.get("app_name");
   if (p.get("message_contains"))  f.message_contains  = p.get("message_contains");
+  if (p.get("from_time"))         f.fromTime          = p.get("from_time");
+  if (p.get("until_time"))        f.untilTime         = p.get("until_time");
   const sev = p.get("severity_max");
   if (sev !== null && sev !== "") f.severity_max       = parseInt(sev, 10);
   return f;
@@ -62,10 +64,20 @@ function SevBadge({ name }) {
   );
 }
 
+const today = new Date();
+function isSameDay(d) {
+  return d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate();
+}
+
 function LogRow({ log, highlight, tightBottom }) {
   const d = new Date(parseTs(log.received_at));
-  const ts = d.toLocaleTimeString("sv-SE", { hour12: false }) +
+  const timePart = d.toLocaleTimeString("sv-SE", { hour12: false }) +
     "." + String(d.getMilliseconds()).padStart(3, "0");
+  const ts = isSameDay(d)
+    ? timePart
+    : d.toLocaleDateString("sv-SE") + " " + timePart;
   const msg = highlight
     ? log.message.replace(new RegExp(`(${highlight})`, "gi"), "§§$1§§")
     : log.message;
@@ -194,6 +206,58 @@ function QueryPanel({ sql, onRun, loading }) {
   );
 }
 
+const inputStyle = {
+  background: "#1c1c1e", border: "1px solid #2c2c2e", borderRadius: 5,
+  color: "#ebebf5", padding: "4px 8px", fontSize: 12,
+  fontFamily: "'JetBrains Mono', monospace", outline: "none", width: 200,
+};
+const btnStyle = {
+  background: "#2c2c2e", border: "none", borderRadius: 5,
+  color: "#ebebf5", padding: "4px 10px", fontSize: 12,
+  cursor: "pointer", fontFamily: "'JetBrains Mono', monospace",
+};
+
+function TimePicker({ filters, onChange }) {
+  const presets = ["5m","15m","1h","6h","24h","7d"];
+  const [custom, setCustom] = useState(!!filters.fromTime);
+  return (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <select
+        value={custom ? "custom" : (filters.since || "1h")}
+        onChange={(e) => {
+          if (e.target.value === "custom") {
+            setCustom(true);
+          } else {
+            setCustom(false);
+            onChange({ since: e.target.value, fromTime: undefined, untilTime: undefined });
+          }
+        }}
+        style={{ ...inputStyle, width: 90 }}
+      >
+        {presets.map(v => <option key={v} value={v}>{v}</option>)}
+        <option value="custom">custom…</option>
+      </select>
+      {custom && (
+        <>
+          <input
+            type="datetime-local"
+            value={filters.fromTime || ""}
+            onChange={(e) => onChange({ fromTime: e.target.value || undefined })}
+            style={{ ...inputStyle, width: 160, colorScheme: "dark" }}
+          />
+          <span style={{ color: "#636366", fontSize: 11 }}>→</span>
+          <input
+            type="datetime-local"
+            value={filters.untilTime || ""}
+            onChange={(e) => onChange({ untilTime: e.target.value || undefined })}
+            style={{ ...inputStyle, width: 160, colorScheme: "dark" }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 function Toolbar({ filters, setFilters, loading, onRefresh, onClear, onResetCleared, liveMode, setLiveMode, showSql, onToggleSql }) {
   return (
     <div style={{
@@ -228,13 +292,13 @@ function Toolbar({ filters, setFilters, loading, onRefresh, onClear, onResetClea
           <option key={s} value={i}>{s} ({i})</option>
         ))}
       </select>
-      <select
-        value={filters.since || "1h"}
-        onChange={(e) => { onResetCleared(); setFilters((f) => ({ ...f, since: e.target.value })); }}
-        style={{ ...inputStyle, width: 90 }}
-      >
-        {["5m","15m","1h","6h","24h","7d"].map(v => <option key={v} value={v}>{v}</option>)}
-      </select>
+      <TimePicker
+        filters={filters}
+        onChange={(update) => {
+          onResetCleared();
+          setFilters((f) => ({ ...f, ...update }));
+        }}
+      />
       <button
         onClick={() => setLiveMode((v) => !v)}
         style={{
@@ -260,17 +324,6 @@ function Toolbar({ filters, setFilters, loading, onRefresh, onClear, onResetClea
     </div>
   );
 }
-
-const inputStyle = {
-  background: "#1c1c1e", border: "1px solid #2c2c2e", borderRadius: 5,
-  color: "#ebebf5", padding: "4px 8px", fontSize: 12,
-  fontFamily: "'JetBrains Mono', monospace", outline: "none", width: 200,
-};
-const btnStyle = {
-  background: "#2c2c2e", border: "none", borderRadius: 5,
-  color: "#ebebf5", padding: "4px 10px", fontSize: 12,
-  cursor: "pointer", fontFamily: "'JetBrains Mono', monospace",
-};
 
 function StatsBar({ stats }) {
   if (!stats) return null;
@@ -315,7 +368,7 @@ export default function App() {
   const filtersRef = useRef(filters);
   useEffect(() => { clearedAtRef.current = clearedAt; }, [clearedAt]);
   useEffect(() => { filtersRef.current = filters; }, [filters]);
-  useEffect(() => { setSql(buildLogsSQL({ ...filters, from: clearedAt })); }, [filters, clearedAt]);
+  useEffect(() => { setSql(buildLogsSQL({ ...filters, from: filters.fromTime || clearedAt, until: filters.untilTime })); }, [filters, clearedAt]);
 
   useEffect(() => {
     const p = new URLSearchParams();
@@ -325,6 +378,8 @@ export default function App() {
     if (filters.app_name)          p.set("app_name",          filters.app_name);
     if (filters.message_contains)  p.set("message_contains",  filters.message_contains);
     if (filters.severity_max != null) p.set("severity_max",   filters.severity_max);
+    if (filters.fromTime)          p.set("from_time",         filters.fromTime);
+    if (filters.untilTime)         p.set("until_time",        filters.untilTime);
     if (liveMode)                  p.set("live",              "1");
     const qs = p.toString();
     history.replaceState(null, "", qs ? `?${qs}` : location.pathname);
@@ -333,9 +388,11 @@ export default function App() {
   const fetchLogs = useCallback(async () => {
     setLoading(true);
     try {
+      const from = filters.fromTime || clearedAt;
+      const until = filters.untilTime;
       const [logData, hostData, statsData] = await Promise.all([
-        api.getLogs({ ...filters, from: clearedAt }),
-        api.getHosts({ ...filters, source_ip: undefined, from: clearedAt }),
+        api.getLogs({ ...filters, from, until }),
+        api.getHosts({ ...filters, source_ip: undefined, from, until }),
         api.getStats(filters.since || "1h"),
       ]);
       setTruncated(logData.length >= MAX_ROWS);
@@ -364,7 +421,7 @@ export default function App() {
     const oldest = logs[0].received_at;
     setLoadingOlder(true);
     try {
-      const older = await api.getLogs({ ...filters, from: clearedAt, before: oldest });
+      const older = await api.getLogs({ ...filters, from: filters.fromTime || clearedAt, until: filters.untilTime, before: oldest });
       if (older.length === 0) { setHasMore(false); return; }
       prependScrollHeightRef.current = scrollRef.current?.scrollHeight ?? 0;
       setHasMore(older.length >= MAX_ROWS);
