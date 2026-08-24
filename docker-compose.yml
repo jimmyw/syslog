@@ -67,6 +67,7 @@ services:
       - --email-domain=*
       - --upstream=http://frontend:80
       - --http-address=0.0.0.0:80
+      - --skip-auth-regex=^/favicon\.ico$
       - --redirect-url=https://syslog.wennlund.nu/oauth2/callback
       - --skip-provider-button=true
       - --cookie-secure=true
