@@ -7,9 +7,12 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
+import { requireBearerAuth, router as oauthRouter } from "./oauth/router.js";
 
 const app = express();
 app.use(express.json());
+app.use(oauthRouter);
+app.use("/mcp", requireBearerAuth);
 
 const transports = new Map(); // sessionId -> StreamableHTTPServerTransport
 

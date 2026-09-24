@@ -68,6 +68,12 @@ services:
       - --upstream=http://frontend:80
       - --http-address=0.0.0.0:80
       - --skip-auth-regex=^/favicon\.ico$
+      # MCP OAuth: mcp-server is its own authorization server + bearer-token resource server
+      - --skip-auth-regex=^/mcp
+      - --skip-auth-regex=^/\.well-known/
+      - --skip-auth-regex=^/register$
+      - --skip-auth-regex=^/authorize
+      - --skip-auth-regex=^/token$
       - --redirect-url=https://syslog.wennlund.nu/oauth2/callback
       - --skip-provider-button=true
       - --cookie-secure=true
@@ -94,6 +100,12 @@ services:
     restart: unless-stopped
     environment:
       CLICKHOUSE_HOST: clickhouse
+      PUBLIC_BASE_URL: https://syslog.wennlund.nu
+      GITHUB_ALLOWED_USERS: ${GITHUB_ALLOWED_USERS}
+      MCP_GITHUB_CLIENT_ID: ${MCP_GITHUB_CLIENT_ID}
+      MCP_GITHUB_CLIENT_SECRET: ${MCP_GITHUB_CLIENT_SECRET}
+    volumes:
+      - mcp_oauth_data:/data
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -104,6 +116,8 @@ services:
 
 volumes:
   clickhouse_data:
+    driver: local
+  mcp_oauth_data:
     driver: local
 networks:
   pub_net:

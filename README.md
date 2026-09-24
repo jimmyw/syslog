@@ -25,7 +25,7 @@ Remote devices (UDP/TCP :514)
    ┌────┴────┐
    │         │
  browser  mcp-server       HTTP MCP server (Streamable HTTP transport)
-           /mcp             5 tools, auth via _syslog session cookie
+           /mcp             5 tools, OAuth bearer tokens
 ```
 
 ## Quick start
@@ -111,109 +111,72 @@ Flags: `--since` / `--until` (relative `5m,6h,2d` or ISO8601), `--format text|js
 
 ## MCP Server
 
-The MCP server runs as an HTTP service behind oauth2-proxy, reachable at `/mcp` on the same domain as the frontend. Authentication uses the same GitHub OAuth session cookie as the browser.
+The MCP server is its own OAuth 2.1 authorization server (GitHub is the identity
+provider), reachable at `/mcp` on the same domain as the frontend. MCP clients
+authenticate with `claude mcp login` / the client's built-in login — no tokens to
+copy around. oauth2-proxy still protects the web UI; `/mcp` and the OAuth
+endpoints (`/.well-known/*`, `/register`, `/authorize`, `/token`) bypass it and
+are handled by `mcp-server` itself.
 
-### 0. Get access
+### 0. Server setup (once)
 
-oauth2-proxy authorizes against an explicit username allowlist
-(`GITHUB_ALLOWED_USERS` in the server's `.env`, wired to `--github-user`), not org
-membership. A new user's GitHub username must be added there and oauth2-proxy
-restarted, otherwise the login in step 1 just bounces back to GitHub.
+Classic GitHub OAuth Apps allow only one callback URL and the first is used by
+oauth2-proxy, so create a **second** OAuth App for MCP:
 
-Each user authenticates as themselves — session cookies are personal and must not
-be shared or copied between machines.
+- Callback URL: `https://syslog.wennlund.nu/mcp/oauth/github/callback`
+- Put its credentials in `.env` as `MCP_GITHUB_CLIENT_ID` / `MCP_GITHUB_CLIENT_SECRET`
 
-### 1. Get a session token
+Then `docker compose up -d --build mcp-server oauth2-proxy frontend`.
 
-Run `stream_host.py` once to authenticate and save a token:
+### 1. Get access
 
-```bash
-python stream_host.py --logout  # clear any stale token
-python stream_host.py           # opens browser, saves token, then Ctrl+C
-```
-
-The token is stored at `~/.config/syslog-stream/token-<hash>`. Read it:
-
-```bash
-cat ~/.config/syslog-stream/token-*
-```
+Authorization is an explicit username allowlist (`GITHUB_ALLOWED_USERS` in the
+server's `.env`, shared by oauth2-proxy and the MCP server), not org membership.
+A new user's GitHub username must be added there and `mcp-server` +
+`oauth2-proxy` restarted, otherwise login ends on an "Access denied" page.
 
 ### 2. Configure Claude Code
 
-Easiest is to let the CLI write the config, which registers the server for all
-projects (user scope):
-
 ```bash
-tok=$(cat ~/.config/syslog-stream/token-*)
-claude mcp add-json syslog "{\"type\":\"http\",\"url\":\"https://syslog.wennlund.nu/mcp\",\"headers\":{\"Cookie\":\"_syslog=$tok\"}}" --scope user
+claude mcp add --transport http syslog https://syslog.wennlund.nu/mcp --scope user
+claude mcp login syslog
 ```
 
-To configure a single project instead, create `.mcp.json` at the project root:
+`login` opens a browser for GitHub. Access tokens last 1 hour and are refreshed
+automatically with a rotating refresh token (valid 1 year), so you normally log in
+once per machine. To configure a single project instead, put this in `.mcp.json`
+and run `claude mcp login syslog`:
 
 ```json
 {
   "mcpServers": {
-    "syslog": {
-      "type": "http",
-      "url": "https://syslog.wennlund.nu/mcp",
-      "headers": {
-        "Cookie": "_syslog=<paste token here>"
-      }
-    }
+    "syslog": { "type": "http", "url": "https://syslog.wennlund.nu/mcp" }
   }
 }
 ```
 
-> **Do not use `~/.claude/mcp.json`** — Claude Code does not read that path, and a
-> config placed there silently never loads. The only locations that work are
-> `.mcp.json` at a project root and the `mcpServers` block in `~/.claude.json`
-> (which is what `claude mcp add-json --scope user` writes).
+> **Do not use `~/.claude/mcp.json`** — Claude Code does not read that path. The
+> only locations that work are `.mcp.json` at a project root and the `mcpServers`
+> block in `~/.claude.json` (what `claude mcp add --scope user` writes).
 
-MCP servers are loaded at session start, so **restart Claude Code** after adding the
-config. Verify with `claude mcp list`, or check that the `mcp__syslog__*` tools are
-available in a new session.
+Restart Claude Code after adding the config, then check `claude mcp list`.
 
 ### 3. Configure Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Add the server as a custom connector with URL `https://syslog.wennlund.nu/mcp`
+and complete the GitHub login when prompted.
 
-```json
-{
-  "mcpServers": {
-    "syslog": {
-      "type": "http",
-      "url": "https://syslog.wennlund.nu/mcp",
-      "headers": {
-        "Cookie": "_syslog=<paste token here>"
-      }
-    }
-  }
-}
-```
+### Revoking access
 
-### Token expiry
+Issued clients and tokens live in the `mcp_oauth_data` volume
+(`/data/oauth-store.json`). Remove a user from `GITHUB_ALLOWED_USERS` and restart
+`mcp-server` to cut them off (checked on every request), or delete the file to
+force everyone to log in again.
 
-The `_syslog` session cookie expires after 90 days. Expiry is enforced server-side
-via `max_age`, and a stale cookie shows up only as a `302` redirect to the GitHub
-login — not as a clean error from the MCP tools.
+### Migrating from the old cookie-header setup
 
-The cookie is `<data>|<signed-at-unix-ts>|<signature>`. The middle number is the
-time the cookie was **issued**, not when it expires — don't try to read an expiry
-date out of it.
-
-To refresh, mint a new token and re-register it. The token cached under
-`~/.config/syslog-stream/` and the copy in the MCP config are independent, so
-updating the cache alone is not enough:
-
-```bash
-python stream_host.py --logout
-python stream_host.py            # browser login, then Ctrl+C
-tok=$(cat ~/.config/syslog-stream/token-*)
-claude mcp remove syslog --scope user
-claude mcp add-json syslog "{\"type\":\"http\",\"url\":\"https://syslog.wennlund.nu/mcp\",\"headers\":{\"Cookie\":\"_syslog=$tok\"}}" --scope user
-```
-
-Restart Claude Code afterwards.
+Existing configs with a `Cookie: _syslog=...` header no longer work. On each
+machine: `claude mcp remove syslog --scope user`, then redo step 2.
 
 ### Available tools
 
