@@ -44,6 +44,44 @@ services:
       pub_net:
         ipv4_address: 192.168.1.247
 
+  # ─── Syslog Receiver (Rust / io_uring, parallel to the Go one for comparison) ─
+  syslog-receiver-rs:
+    build: ./syslog-receiver-rs
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined   # default seccomp profile blocks io_uring_setup/enter/register
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      TABLE: logs_rs
+      SYSLOG_PORT: "1514"
+      HTTP_PORT: "8889"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "1514:1514/udp"
+      - "1514:1514/tcp"
+    networks:
+      default:
+        ipv4_address: 192.168.10.25
+
+  # Fans a single syslog message out to both receivers above so they can be
+  # compared on identical input; also provides `mirror replay` (see README).
+  syslog-mirror:
+    build: ./syslog-receiver-rs
+    entrypoint: ["/usr/local/bin/mirror"]
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+    depends_on:
+      - syslog-receiver
+      - syslog-receiver-rs
+    ports:
+      - "5514:5514/udp"
+    networks:
+      default:
+        ipv4_address: 192.168.10.26
+
   # ─── Frontend ──────────────────────────────────────────────────────────────
   frontend:
     build: ./frontend

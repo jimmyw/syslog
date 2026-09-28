@@ -195,6 +195,55 @@ machine: `claude mcp remove syslog --scope user`, then redo step 2.
 - *"Show me the log rate for the last 24 hours"*
 - *"Are there any critical or emergency logs in the past 30 minutes?"*
 
+## Rust / io_uring receiver (experimental, runs alongside the Go one)
+
+`syslog-receiver-rs/` is an alternative to `syslog-receiver` written in Rust on
+[monoio](https://github.com/bytedance/monoio) (io_uring, thread-per-core), doing
+the same job: UDP/TCP syslog ingest, RFC3164/5424 parsing, batched ClickHouse
+inserts, and `/poll` + `/ws` + `/stream` for the live view. It runs **in
+parallel** with the Go receiver rather than replacing it, so the two can be
+compared on identical input:
+
+| | Go | Rust |
+|---|---|---|
+| Syslog UDP/TCP | `:514` | `:1514` |
+| HTTP (poll/ws/stream) | `:8888` | `:8889` (also via nginx at `/rs/poll`, `/rs/ws`, `/rs/stream`) |
+| ClickHouse table | `syslog.logs` | `syslog.logs_rs` |
+
+Requires a kernel with io_uring (5.19+; check `uname -r`) and
+`security_opt: seccomp:unconfined` on the container, since Docker's default
+seccomp profile blocks the `io_uring_*` syscalls — already set in
+`docker-compose.yml` for `syslog-receiver-rs`.
+
+### Comparing the two
+
+```bash
+docker compose up -d --build syslog-receiver-rs syslog-mirror
+```
+
+`syslog-mirror` listens on UDP `:5514` and forwards every message byte-for-byte
+to both receivers, so pointing a real device (or `logger -P 5514`) at it feeds
+both at once. `mirror replay [N]` re-sends the last N rows from `syslog.logs`
+as a repeatable test corpus:
+
+```bash
+docker compose run --rm syslog-mirror replay 5000
+```
+
+Then diff what landed:
+
+```bash
+docker compose run --rm syslog-receiver-rs /usr/local/bin/compare "1 HOUR"
+```
+
+reports rows missing from one table or the other and any field mismatches
+between them (matched by source IP + message). Also compare the live views —
+`/` (Go) vs. `/rs/` paths — and `docker stats` for CPU/RSS under load.
+
+`syslog-receiver-rs` is not wired into the main `:514`/`:8888` path or the
+frontend UI; promoting it would mean pointing those at it and dropping the Go
+service, once the comparison above looks good.
+
 ## ClickHouse schema
 
 ```sql
