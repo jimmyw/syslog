@@ -209,9 +209,6 @@ Requires a kernel with io_uring (5.19+; check `uname -r`) and
 seccomp profile blocks the `io_uring_*` syscalls — already set in
 `docker-compose.yml` for `syslog-receiver`.
 
-A previous Go implementation (`syslog-receiver/`) is kept in the repo for
-reference but is no longer built or deployed.
-
 ## ClickHouse schema
 
 ```sql
