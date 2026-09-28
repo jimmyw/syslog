@@ -13,8 +13,6 @@ flume = "0.11"
 httparse = "1"
 signal-hook = "0.3"
 percent-encoding = "2"
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
 bytes = "1"
 http = "1"
 

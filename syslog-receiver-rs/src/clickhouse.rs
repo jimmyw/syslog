@@ -39,7 +39,10 @@ impl Ch {
 
 async fn wait_ready(ch: &Ch, table: &str) {
     for i in 1..=30 {
+        // `logs` itself is created by clickhouse/init.sql; only alt tables
+        // (e.g. a side-by-side comparison run) need creating here.
         let r = match ch.query("SELECT 1", "", Bytes::new()).await {
+            Ok(()) if table == "logs" => Ok(()),
             Ok(()) => ch.query(&format!("CREATE TABLE IF NOT EXISTS syslog.{table} AS syslog.logs"), "", Bytes::new()).await,
             Err(e) => Err(e),
         };

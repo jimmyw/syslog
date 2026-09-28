@@ -8,7 +8,7 @@ Fast, efficient syslog collection → ClickHouse → React frontend, with MCP su
 Remote devices (UDP/TCP :514)
         │
         ▼
-  syslog-receiver          Custom Go service
+  syslog-receiver          Rust / io_uring (monoio), thread-per-core
   (UDP+TCP :514)           Batched writes, ~2s flush
         │
         ▼
@@ -195,54 +195,22 @@ machine: `claude mcp remove syslog --scope user`, then redo step 2.
 - *"Show me the log rate for the last 24 hours"*
 - *"Are there any critical or emergency logs in the past 30 minutes?"*
 
-## Rust / io_uring receiver (experimental, runs alongside the Go one)
+## Syslog receiver (Rust / io_uring)
 
-`syslog-receiver-rs/` is an alternative to `syslog-receiver` written in Rust on
-[monoio](https://github.com/bytedance/monoio) (io_uring, thread-per-core), doing
-the same job: UDP/TCP syslog ingest, RFC3164/5424 parsing, batched ClickHouse
-inserts, and `/poll` + `/ws` + `/stream` for the live view. It runs **in
-parallel** with the Go receiver rather than replacing it, so the two can be
-compared on identical input:
-
-| | Go | Rust |
-|---|---|---|
-| Syslog UDP/TCP | `:514` | `:1514` |
-| HTTP (poll/ws/stream) | `:8888` | `:8889` (also via nginx at `/rs/poll`, `/rs/ws`, `/rs/stream`) |
-| ClickHouse table | `syslog.logs` | `syslog.logs_rs` |
+`syslog-receiver-rs/` is the syslog ingest service: UDP/TCP `:514`,
+RFC3164/5424 parsing, batched ClickHouse inserts into `syslog.logs`, and
+`/poll` + `/ws` + `/stream` on `:8888` for the live view. Written in Rust on
+[monoio](https://github.com/bytedance/monoio), doing all IO — syslog ingest,
+the ClickHouse HTTP writes, and the live-view HTTP/WS/SSE server — through
+io_uring instead of epoll, thread-per-core.
 
 Requires a kernel with io_uring (5.19+; check `uname -r`) and
 `security_opt: seccomp:unconfined` on the container, since Docker's default
 seccomp profile blocks the `io_uring_*` syscalls — already set in
-`docker-compose.yml` for `syslog-receiver-rs`.
+`docker-compose.yml` for `syslog-receiver`.
 
-### Comparing the two
-
-```bash
-docker compose up -d --build syslog-receiver-rs syslog-mirror
-```
-
-`syslog-mirror` listens on UDP `:5514` and forwards every message byte-for-byte
-to both receivers, so pointing a real device (or `logger -P 5514`) at it feeds
-both at once. `mirror replay [N]` re-sends the last N rows from `syslog.logs`
-as a repeatable test corpus:
-
-```bash
-docker compose run --rm syslog-mirror replay 5000
-```
-
-Then diff what landed:
-
-```bash
-docker compose run --rm syslog-receiver-rs /usr/local/bin/compare "1 HOUR"
-```
-
-reports rows missing from one table or the other and any field mismatches
-between them (matched by source IP + message). Also compare the live views —
-`/` (Go) vs. `/rs/` paths — and `docker stats` for CPU/RSS under load.
-
-`syslog-receiver-rs` is not wired into the main `:514`/`:8888` path or the
-frontend UI; promoting it would mean pointing those at it and dropping the Go
-service, once the comparison above looks good.
+A previous Go implementation (`syslog-receiver/`) is kept in the repo for
+reference but is no longer built or deployed.
 
 ## ClickHouse schema
 
@@ -257,16 +225,22 @@ service, once the comparison above looks good.
 
 ## Performance
 
-- Go receiver: single binary, handles ~50k msgs/sec on a modest VM
+- Rust/io_uring receiver: single binary, one worker thread per core
 - Batch writes: 1000 rows or 2s, whichever comes first
 - ClickHouse: columnar storage, LZ4/ZSTD compression, MergeTree engine
 - Frontend: direct ClickHouse HTTP queries, no intermediate API layer
 
 ## Tuning
 
-**Batch size / flush interval** (syslog-receiver/main.go):
-```go
-bw := NewBatchWriter(conn, 1000, 2*time.Second)  // 1000 rows or 2s
+**Batch size / flush interval** (syslog-receiver-rs/src/clickhouse.rs):
+```rust
+const BATCH_SIZE: usize = 1000;
+const FLUSH_EVERY: Duration = Duration::from_secs(2);
+```
+
+**Worker threads** (env `WORKERS`, default: one per CPU core):
+```bash
+WORKERS=4
 ```
 
 **TTL** (clickhouse/init.sql):

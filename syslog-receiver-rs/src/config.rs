@@ -16,7 +16,7 @@ impl Config {
     pub fn from_env() -> Self {
         Config {
             clickhouse_host: env::var("CLICKHOUSE_HOST").unwrap_or_else(|_| "clickhouse".into()),
-            table: env::var("TABLE").unwrap_or_else(|_| "logs_rs".into()),
+            table: env::var("TABLE").unwrap_or_else(|_| "logs".into()),
             syslog_port: var("SYSLOG_PORT", 514),
             http_port: var("HTTP_PORT", 8888),
             workers: var(
