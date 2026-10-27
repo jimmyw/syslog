@@ -22,22 +22,58 @@ struct Ch {
     base: String,
 }
 
+fn new_client() -> Client {
+    Client::builder().http1_client().build()
+}
+
 impl Ch {
-    async fn query(&self, sql: &str, extra: &str, body: Bytes) -> Result<(), String> {
+    /// Runs `sql`; on a transport error, replaces the client (and with it the
+    /// connection pool) and retries once on a fresh connection.
+    async fn query(&mut self, sql: &str, extra: &str, body: Bytes) -> Result<(), String> {
+        match self.try_query(sql, extra, body.clone()).await {
+            Err(Transport(e)) => {
+                // monoio-http-client 0.3 returns a connection to the keep-alive
+                // pool even after a send fails, so a dead socket would be reused
+                // (and fail with EPIPE) forever. Drop the whole pool instead.
+                eprintln!("ClickHouse connection error, reconnecting: {e}");
+                self.client = new_client();
+                self.try_query(sql, extra, body).await.map_err(|e| match e {
+                    Transport(e) => {
+                        self.client = new_client();
+                        e
+                    }
+                    Server(e) => e,
+                })
+            }
+            r => r.map_err(|e| match e {
+                Transport(e) | Server(e) => e,
+            }),
+        }
+    }
+
+    async fn try_query(&self, sql: &str, extra: &str, body: Bytes) -> Result<(), QueryError> {
         let url = format!("{}/?query={}{}", self.base, utf8_percent_encode(sql, NON_ALPHANUMERIC), extra);
-        let resp = self.client.post(url).send_body(body).await.map_err(|e| e.to_string())?;
+        let resp = self.client.post(url).send_body(body).await.map_err(|e| Transport(e.to_string()))?;
         let status = resp.status();
         if status.is_success() {
             let _ = resp.bytes().await;
             Ok(())
         } else {
             let text = resp.bytes().await.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            Err(format!("HTTP {status}: {}", text.trim()))
+            Err(Server(format!("HTTP {status}: {}", text.trim())))
         }
     }
 }
 
-async fn wait_ready(ch: &Ch, table: &str) {
+enum QueryError {
+    /// Connection-level failure; the pooled connection may be dead.
+    Transport(String),
+    /// ClickHouse answered with an error status.
+    Server(String),
+}
+use QueryError::{Server, Transport};
+
+async fn wait_ready(ch: &mut Ch, table: &str) {
     for i in 1..=30 {
         // `logs` itself is created by clickhouse/init.sql; only alt tables
         // (e.g. a side-by-side comparison run) need creating here.
@@ -61,7 +97,7 @@ async fn wait_ready(ch: &Ch, table: &str) {
     std::process::exit(1);
 }
 
-async fn flush(ch: &Ch, table: &str, batch: &mut Vec<Arc<Msg>>) {
+async fn flush(ch: &mut Ch, table: &str, batch: &mut Vec<Arc<Msg>>) {
     if batch.is_empty() {
         return;
     }
@@ -78,8 +114,8 @@ async fn flush(ch: &Ch, table: &str, batch: &mut Vec<Arc<Msg>>) {
 }
 
 pub async fn run(host: String, table: String, rx: flume::Receiver<Cmd>) {
-    let ch = Ch { client: Client::builder().http1_client().build(), base: format!("http://{host}:8123") };
-    wait_ready(&ch, &table).await;
+    let mut ch = Ch { client: new_client(), base: format!("http://{host}:8123") };
+    wait_ready(&mut ch, &table).await;
 
     let mut batch: Vec<Arc<Msg>> = Vec::with_capacity(BATCH_SIZE);
     let mut last_flush = Instant::now();
@@ -89,21 +125,21 @@ pub async fn run(host: String, table: String, rx: flume::Receiver<Cmd>) {
             Ok(Ok(Cmd::Entry(m))) => {
                 batch.push(m);
                 if batch.len() >= BATCH_SIZE {
-                    flush(&ch, &table, &mut batch).await;
+                    flush(&mut ch, &table, &mut batch).await;
                     last_flush = Instant::now();
                 }
             }
             Ok(Ok(Cmd::Shutdown(ack))) => {
-                flush(&ch, &table, &mut batch).await;
+                flush(&mut ch, &table, &mut batch).await;
                 let _ = ack.send(());
                 return;
             }
             Ok(Err(_)) => {
-                flush(&ch, &table, &mut batch).await;
+                flush(&mut ch, &table, &mut batch).await;
                 return;
             }
             Err(_) => {
-                flush(&ch, &table, &mut batch).await;
+                flush(&mut ch, &table, &mut batch).await;
                 last_flush = Instant::now();
             }
         }
