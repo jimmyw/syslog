@@ -5,10 +5,10 @@ use crate::clickhouse::Cmd;
 use crate::json::event_json;
 use crate::parse::{normalize_ip, parse_syslog};
 use crate::store::{Msg, Shared};
-use monoio::io::AsyncReadRent;
-use monoio::net::{udp::UdpSocket, TcpListener};
 use std::sync::Arc;
 use std::time::SystemTime;
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 #[derive(Clone)]
 pub struct Ctx {
@@ -28,12 +28,9 @@ impl Ctx {
 }
 
 pub async fn udp_loop(sock: UdpSocket, ctx: Ctx) {
-    let mut buf: Vec<u8> = Vec::with_capacity(65536);
+    let mut buf = vec![0u8; 65536];
     loop {
-        buf.clear();
-        let (res, b) = sock.recv_from(buf).await;
-        buf = b;
-        match res {
+        match sock.recv_from(&mut buf).await {
             Ok((n, src)) => ctx.ingest(&buf[..n], &normalize_ip(src.ip())),
             Err(e) => {
                 eprintln!("udp recv error: {e}");
@@ -47,24 +44,22 @@ pub async fn tcp_accept_loop(listener: TcpListener, ctx: Ctx) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                monoio::spawn(tcp_conn(stream, normalize_ip(addr.ip()), ctx.clone()));
+                tokio::spawn(tcp_conn(stream, normalize_ip(addr.ip()), ctx.clone()));
             }
             Err(e) => {
+                // Transient (e.g. EMFILE); keep accepting rather than going deaf.
                 eprintln!("tcp accept error: {e}");
-                return;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }
 }
 
-async fn tcp_conn(mut stream: monoio::net::TcpStream, src_ip: String, ctx: Ctx) {
-    let mut buf: Vec<u8> = Vec::with_capacity(65536);
+async fn tcp_conn(mut stream: TcpStream, src_ip: String, ctx: Ctx) {
+    let mut buf = vec![0u8; 65536];
     let mut acc: Vec<u8> = Vec::new();
     loop {
-        buf.clear();
-        let (res, b) = stream.read(buf).await;
-        buf = b;
-        match res {
+        match stream.read(&mut buf).await {
             Ok(0) | Err(_) => return,
             Ok(n) => acc.extend_from_slice(&buf[..n]),
         }

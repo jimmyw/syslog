@@ -26,12 +26,10 @@ services:
       default:
         ipv4_address: 192.168.10.21
 
-  # ─── Syslog Receiver (Rust / io_uring) ─────────────────────────────────────
+  # ─── Syslog Receiver (Rust / tokio) ────────────────────────────────────────
   syslog-receiver:
     build: ./syslog-receiver-rs
     restart: unless-stopped
-    security_opt:
-      - seccomp:unconfined   # default seccomp profile blocks io_uring_setup/enter/register
     environment:
       CLICKHOUSE_HOST: clickhouse
       TABLE: logs

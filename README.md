@@ -8,7 +8,7 @@ Fast, efficient syslog collection → ClickHouse → React frontend, with MCP su
 Remote devices (UDP/TCP :514)
         │
         ▼
-  syslog-receiver          Rust / io_uring (monoio), thread-per-core
+  syslog-receiver          Rust / tokio
   (UDP+TCP :514)           Batched writes, ~2s flush
         │
         ▼
@@ -195,19 +195,15 @@ machine: `claude mcp remove syslog --scope user`, then redo step 2.
 - *"Show me the log rate for the last 24 hours"*
 - *"Are there any critical or emergency logs in the past 30 minutes?"*
 
-## Syslog receiver (Rust / io_uring)
+## Syslog receiver (Rust / tokio)
 
 `syslog-receiver-rs/` is the syslog ingest service: UDP/TCP `:514`,
 RFC3164/5424 parsing, batched ClickHouse inserts into `syslog.logs`, and
 `/poll` + `/ws` + `/stream` on `:8888` for the live view. Written in Rust on
-[monoio](https://github.com/bytedance/monoio), doing all IO — syslog ingest,
-the ClickHouse HTTP writes, and the live-view HTTP/WS/SSE server — through
-io_uring instead of epoll, thread-per-core.
-
-Requires a kernel with io_uring (5.19+; check `uname -r`) and
-`security_opt: seccomp:unconfined` on the container, since Docker's default
-seccomp profile blocks the `io_uring_*` syscalls — already set in
-`docker-compose.yml` for `syslog-receiver`.
+[tokio](https://tokio.rs), with [axum](https://github.com/tokio-rs/axum) for
+the live-view HTTP/WS/SSE server and [reqwest](https://github.com/seanmonstar/reqwest)
+for the ClickHouse HTTP writes. A failed batch is retried once before it is
+dropped.
 
 ## ClickHouse schema
 
@@ -222,7 +218,7 @@ seccomp profile blocks the `io_uring_*` syscalls — already set in
 
 ## Performance
 
-- Rust/io_uring receiver: single binary, one worker thread per core
+- Rust/tokio receiver: single binary, multi-threaded runtime
 - Batch writes: 1000 rows or 2s, whichever comes first
 - ClickHouse: columnar storage, LZ4/ZSTD compression, MergeTree engine
 - Frontend: direct ClickHouse HTTP queries, no intermediate API layer
@@ -235,7 +231,7 @@ const BATCH_SIZE: usize = 1000;
 const FLUSH_EVERY: Duration = Duration::from_secs(2);
 ```
 
-**Worker threads** (env `WORKERS`, default: one per CPU core):
+**Runtime worker threads** (env `WORKERS`, default: one per CPU core):
 ```bash
 WORKERS=4
 ```

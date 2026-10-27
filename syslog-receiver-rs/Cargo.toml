@@ -4,17 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-monoio = { version = "0.2", features = ["iouring", "sync"] }
-monoio-http = "0.3"
-monoio-http-client = "0.3"
-monoio-tungstenite = "0.3"
 socket2 = { version = "0.5", features = ["all"] }
 flume = "0.11"
-httparse = "1"
-signal-hook = "0.3"
 percent-encoding = "2"
-bytes = "1"
-http = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "signal", "sync", "io-util"] }
+axum = { version = "0.8", features = ["ws"] }
+reqwest = { version = "0.13", default-features = false }
+futures-util = { version = "0.3", default-features = false }
 
 [profile.release]
 opt-level = 3
